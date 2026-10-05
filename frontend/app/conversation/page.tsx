@@ -16,6 +16,7 @@ export default function Conversation() {
   const [lines, setLines] = useState<{ who: "user" | "agent"; text: string }[]>([]);
   const [metrics, setMetrics] = useState<{ firstAudioMs?: number; bargeInMs?: number }>({});
   const [tool, setTool] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const client = useRef<VoiceClient | null>(null);
   const active = state !== "idle" && state !== "error";
 
@@ -24,13 +25,14 @@ export default function Conversation() {
     // Demo: token de desarrollo. En producción, el token proviene de tu proveedor de identidad.
     let token: string;
     try { token = await getToken("customer"); } catch { setState("error"); return; }
-    setLines([]); setMetrics({});
+    setLines([]); setMetrics({}); setError(null);
     client.current = new VoiceClient(token, {
       onState: setState,
       onTranscript: (who, text) => setLines((l) => [...l, { who, text }]),
       onMetrics: (m) => setMetrics((p) => ({ ...p, ...m })),
       onTool: (n, phase) => setTool(phase === "start" ? n : null),
       onLevel: setLevel,
+      onError: setError,
     });
     try { await client.current.start(); } catch { setState("error"); }
   }
@@ -57,6 +59,12 @@ export default function Conversation() {
         </button>
         <span className="text-sm font-medium" role="status">{LABEL[state]}{tool ? ` · ${tool}` : ""}</span>
       </div>
+
+      {error && (
+        <p role="alert" className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+          {error === "provider_unavailable" ? "El proveedor de voz no está disponible. Revisa los registros del backend." : error}
+        </p>
+      )}
 
       <div className="h-3 w-full overflow-hidden rounded bg-slate-200" aria-hidden>
         <div className="h-full bg-emerald-500 transition-[width] duration-75" style={{ width: `${Math.min(100, level * 400)}%` }} />

@@ -220,7 +220,13 @@ def create_app(
     def make_provider() -> RealtimeProvider:
         if provider_factory:
             return provider_factory()
-        return OpenAIRealtimeProvider(s) if s.openai_api_key else FakeProvider()
+        if s.openai_api_key:
+            return OpenAIRealtimeProvider(s)
+        # Modo simulado: responde una vez por sesión para poder ver la interfaz sin clave ni crédito.
+        return FakeProvider(respond_on_audio=True, script=[
+            {"type": "transcript_user", "text": "(simulado) Hola, quiero consultar el stock."},
+            {"type": "transcript_agent", "text": "Modo simulado: añade OPENAI_API_KEY con crédito en .env para voz real."},
+        ])
 
     @app.websocket("/ws/audio")
     async def ws_audio(ws: WebSocket, ticket: str = ""):

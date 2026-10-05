@@ -6,6 +6,7 @@ export interface VoiceEvents {
   onMetrics: (m: { firstAudioMs?: number; bargeInMs?: number }) => void;
   onTool: (name: string, phase: "start" | "end", ok?: boolean) => void;
   onLevel: (rms: number) => void;
+  onError?: (message: string) => void;
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -106,15 +107,24 @@ export class VoiceClient {
       case "tool.start": this.ev.onTool(msg.name, "start"); this.ev.onState("processing"); break;
       case "tool.end": this.ev.onTool(msg.name, "end", msg.ok); break;
       case "state": this.agentSpeaking = false; this.ev.onState("listening"); break;
-      case "error": this.ev.onState("error"); break;
+      case "error":
+        // El servidor avisa de un fallo (p. ej. el proveedor sin crédito): se libera el micrófono y se informa.
+        this.ev.onError?.(String(msg.message ?? "error"));
+        void this.shutdown().then(() => this.ev.onState("error"));
+        break;
     }
   }
 
-  async stop() {
-    this.ws?.send(JSON.stringify({ type: "end" }));
+  private async shutdown() {
+    if (this.ws) this.ws.onclose = null;
+    try { this.ws?.send(JSON.stringify({ type: "end" })); } catch { /* ya cerrado */ }
     this.ws?.close();
     this.stream?.getTracks().forEach((t) => t.stop());
-    await this.ctx?.close();
+    try { await this.ctx?.close(); } catch { /* ya cerrado */ }
+  }
+
+  async stop() {
+    await this.shutdown();
     this.ev.onState("idle");
   }
 }

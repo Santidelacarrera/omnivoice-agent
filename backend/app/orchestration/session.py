@@ -89,8 +89,8 @@ class VoiceSession:
 
     # ---- entrada del cliente ----
     async def on_audio(self, pcm: bytes, seq: int | None = None) -> None:
-        if self._closed:
-            return
+        if self._closed or self._provider_failed:
+            return  # sin proveedor no hay conversación: no se procesa más audio ni se ensucia la máquina de estados
         self._audio_in_bytes += len(pcm)
         if seq is not None:
             self.metrics.track_seq(seq)
