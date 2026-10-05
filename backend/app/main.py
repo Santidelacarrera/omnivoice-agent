@@ -12,7 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import Settings, get_settings
-from app.observability.metrics import BARGE_WINDOW, TTFB_WINDOW
+from app.observability.metrics import BARGE_WINDOW, ERRORS, TTFB_WINDOW
 from app.orchestration.session import VoiceSession
 from app.realtime.provider import FakeProvider, OpenAIRealtimeProvider, RealtimeProvider
 from app.security.auth import Principal, issue_token, require
@@ -257,7 +257,14 @@ def create_app(
                 on_close=on_close,
             )
             live[session_key] = session
-            await session.start()
+            try:
+                await session.start()
+            except Exception:  # noqa: BLE001 - p. ej. el proveedor rechaza la conexión
+                log.exception("session_start_failed", session_key=session_key)
+                ERRORS.labels("provider_connect").inc()
+                await ws.send_text(json.dumps({"type": "error", "message": "provider_unavailable"}))
+                await ws.close(code=1011)
+                return
             while True:
                 remaining = deadline - loop.time()
                 if remaining <= 0:

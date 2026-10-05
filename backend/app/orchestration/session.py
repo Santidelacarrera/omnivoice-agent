@@ -57,6 +57,7 @@ class VoiceSession:
         self._agent_speaking = False
         self._closed = False
         self._provider_failed = False
+        self._counted = False  # ACTIVE_SESSIONS solo se decrementa si se incrementó
 
     async def _audit(self, action: str, detail: dict[str, Any] | None = None) -> None:
         d = {"session_id": self.id, "correlation_id": self.correlation_id, **(detail or {})}
@@ -68,6 +69,7 @@ class VoiceSession:
         await self.provider.connect(self.instructions, self.registry.schemas(self.allowed_tools))
         self._spawn(self._provider_loop())
         ACTIVE_SESSIONS.inc()
+        self._counted = True
         self._set(State.LISTENING)
         await self.send({"type": "session.ready", "session_id": self.id})
         await self._audit("session.started")
@@ -224,7 +226,8 @@ class VoiceSession:
         for t in list(self._tasks):
             t.cancel()
         await self.provider.close()
-        ACTIVE_SESSIONS.dec()
+        if self._counted:
+            ACTIVE_SESSIONS.dec()
         seconds = self._audio_in_bytes / 2 / self.settings.sample_rate
         summary = {"final_state": final_name, "first_audio_ms": self.first_audio_ms,
                    "interruptions": self.metrics.interruptions, "lost_packets": self.metrics.lost_packets,

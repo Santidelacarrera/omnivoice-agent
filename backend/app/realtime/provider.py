@@ -31,7 +31,7 @@ class OpenAIRealtimeProvider:
     async def connect(self, instructions: str, tools: list[dict[str, Any]]) -> None:
         url = f"{self.s.openai_realtime_url}?model={self.s.openai_realtime_model}"
         self.ws = await websockets.connect(
-            url, additional_headers={"Authorization": f"Bearer {self.s.openai_api_key}"}, max_size=2**22
+            url, extra_headers={"Authorization": f"Bearer {self.s.openai_api_key}"}, max_size=2**22
         )
         await self._send(
             {
