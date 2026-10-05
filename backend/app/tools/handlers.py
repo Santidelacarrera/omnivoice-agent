@@ -26,9 +26,12 @@ class Repository(Protocol):
     async def search_kb(self, org_id: str, query: str) -> list[dict[str, Any]]: ...
 
 
+DEMO_ORG = "00000000-0000-0000-0000-000000000001"  # misma organización que migrations/003_*.sql
+
+
 class InMemoryRepository:
     def __init__(self) -> None:
-        self.stock = {("o1", "chaqueta", "negro", "M"): {"units": 4, "price": 89.9}}
+        self.stock = {(org, "chaqueta", "negro", "M"): {"units": 4, "price": 89.9} for org in ("o1", DEMO_ORG)}
         self.reservations: dict[tuple[str, str], dict[str, Any]] = {}
         self.tickets: list[dict[str, Any]] = []
 

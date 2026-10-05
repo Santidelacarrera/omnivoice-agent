@@ -1,43 +1,49 @@
 # OmniVoice Agent
 
-Plataforma de agentes de voz en tiempo real: streaming bidireccional, barge-in, herramientas con datos reales y observabilidad.
+Plataforma de agentes de voz en tiempo real: streaming bidireccional por WebSocket, interrupciones (barge-in) con corte local inmediato, herramientas con datos reales, multi-tenant con aislamiento a nivel de base de datos y observabilidad.
 
 ## Arranque rápido
 
 ```bash
-cp .env.example .env        # añade OPENAI_API_KEY (sin clave se usa un proveedor simulado)
-docker compose up --build
+cp .env.example .env        # añade OPENAI_API_KEY; sin clave se usa un proveedor simulado
+docker compose up --build   # Postgres (migraciones 001-003), Redis, backend, frontend, Prometheus, Grafana
 ```
 
-- Conversación: http://localhost:3000/conversation
-- Panel: http://localhost:3000/dashboard
-- API: http://localhost:8000/docs · Métricas: http://localhost:8000/metrics
+| Qué | Dónde |
+|---|---|
+| Conversación | http://localhost:3000/conversation |
+| Panel, agentes, historial, configuración | `/dashboard`, `/agents`, `/history`, `/settings` |
+| API + OpenAPI | http://localhost:8000/docs |
+| Métricas Prometheus / Grafana | `:8000/metrics` · `:9090` · `:3001` |
 
-Tests del backend: `cd backend && pip install -r requirements.txt && pytest -q`
+**Sin Docker:** `cd backend && pip install -r requirements.txt && PERSISTENCE_BACKEND=memory STATE_BACKEND=memory uvicorn app.main:app` y `cd frontend && npm install && npm run dev`.
 
-## Arquitectura
+## Pruebas
 
+```bash
+cd backend && pytest -q                                   # unitarias, servicios, API y WebSocket
+python -m bench.orchestrator_bench --sessions 200         # overhead del orquestador (sin red)
+python -m bench.loadtest --url http://localhost:8000 --clients 50 --duration 20   # extremo a extremo
+cd ../frontend && npm run typecheck && npm run build
 ```
-Navegador (AudioWorklet PCM16 + VAD local) ──WS──> FastAPI /ws/audio
-                                                      │
-                          VoiceSession (asyncio + máquina de estados)
-                          ├─ VAD servidor ─ barge-in ─ cancel + audio.clear
-                          ├─ RealtimeProvider (OpenAI Realtime | Fake)
-                          └─ ToolRegistry (Pydantic + permisos + timeout + idempotencia)
-                                                      │
-                                          PostgreSQL (RLS por org) · Redis · Prometheus
-```
 
-### Decisiones clave
+CI (`.github/workflows/ci.yml`) ejecuta pytest, un benchmark de humo, aplica las migraciones sobre un PostgreSQL real y comprueba que **RLS aísla organizaciones** y que `omni_app` no es superusuario, y compila el frontend.
 
-- **Barge-in en dos niveles**: el cliente corta su buffer de reproducción en cuanto su VAD local detecta voz (sin esperar a la red) y avisa al servidor, que cancela la respuesta del proveedor y descarta audio obsoleto con un contador de época. Se mide el tiempo hasta el silencio efectivo.
-- **El modelo no accede a la base de datos**: solo propone llamadas; el backend valida argumentos (`extra="forbid"`), comprueba permisos, filtra por `org_id` y devuelve resultados reales. Las escrituras son idempotentes por `call_id`.
-- **Sin claves en el navegador**: el cliente recibe un ticket WS de un solo uso y 30 s de vida.
-- **Métricas**: TTFB (primer audio), tiempo de silencio tras interrupción, paquetes perdidos por huecos de secuencia, duración de herramientas, errores, sesiones activas.
+## Qué incluye
+
+- **Voz en tiempo real:** PCM16 24 kHz, frames de 20 ms con número de secuencia (detecta paquetes perdidos), AudioWorklet de captura y reproducción, adaptador OpenAI Realtime y proveedor simulado.
+- **Barge-in en dos niveles:** el navegador vacía su buffer al detectar voz; el servidor cancela la respuesta, descarta audio y resultados de herramientas obsoletos y mide el tiempo hasta el silencio.
+- **Herramientas seguras:** `check_inventory`, `check_reservation`, `create_reservation`, `create_support_ticket`, `search_knowledge_base`, `transfer_to_human`. Validación estricta, permisos por rol, lista de herramientas por agente, timeout, idempotencia en escrituras y aislamiento por organización.
+- **Seguridad:** JWT con roles, tickets WS de un solo uso (30 s), RLS forzada en PostgreSQL con rol sin superusuario, auditoría append-only, rate limiting, cupo de sesiones por organización, límites de tamaño de frame / inactividad / duración, cabeceras de seguridad, arranque bloqueado si la configuración de producción es insegura.
+- **Observabilidad:** logs JSON con `request_id` y `correlation_id` de sesión, métricas Prometheus (primer audio, silencio tras interrupción, paquetes perdidos, herramientas, errores, sesiones), percentiles p50/p95/p99 en `/api/v1/metrics`, `/healthz` y `/readyz`.
+- **Datos:** 16 tablas con migraciones, conversaciones, transcripciones, eventos, ejecuciones de herramientas, consumo y coste estimado.
+
+Documentación: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (flujo, ADRs, límites) · [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (despliegue, alertas, incidentes).
 
 ## Estado y limitaciones honestas
 
-- Las metas (p50 < 500 ms, barge-in p95 < 200 ms) son **objetivos a validar con pruebas de carga**; dependen del proveedor y la red.
-- `InMemoryRepository` es el repositorio por defecto; `migrations/001_init.sql` define el esquema PostgreSQL con RLS, pero el repositorio PostgreSQL y la persistencia de `audit_logs` están pendientes de implementar.
-- Los nombres de eventos del adaptador OpenAI Realtime deben verificarse contra la versión vigente de la API.
-- Pendiente: Redis para estado compartido entre réplicas, rate limiting, telefonía, múltiples agentes, panel con roles reales y pruebas de carga.
+- **Latencia:** p50 < 500 ms y barge-in p95 < 200 ms son **objetivos a validar** con `bench/loadtest.py` contra tu infraestructura y proveedor. Medido aquí solo el orquestador aislado: el manejo de un barge-in en el servidor tarda del orden de microsegundos con 200 sesiones simultáneas; la latencia real depende del proveedor y la red.
+- **Pendiente de verificar en tu entorno:** los nombres de eventos del adaptador OpenAI Realtime deben contrastarse con la versión vigente de la API (no se probó contra el servicio real).
+- **No implementado:** purga automática por `retention_days` (ver runbook), SSO/gestión de usuarios (el JWT lo emite tu proveedor de identidad), telefonía, grabación de audio, transferencia efectiva a un operador humano (la herramienta solo encola la solicitud), selector de voz/idioma en la UI.
+- El VAD es por energía; en entornos ruidosos conviene un VAD basado en modelo.
+- Percentiles de `/api/v1/metrics` por proceso; con varias réplicas usa los histogramas de Prometheus.

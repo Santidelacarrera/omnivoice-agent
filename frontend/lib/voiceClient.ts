@@ -22,14 +22,21 @@ export class VoiceClient {
   private agentSpeaking = false;
   muted = false;
 
-  constructor(private token: string, private ev: VoiceEvents) {}
+  constructor(private token: string, private ev: VoiceEvents, private agentId?: string) {}
 
   async start() {
     this.ev.onState("connecting");
-    // El navegador solo recibe un ticket de 30 s; la API key del proveedor nunca sale del backend.
-    const r = await fetch(`${API}/api/v1/sessions`, { method: "POST", headers: { Authorization: `Bearer ${this.token}` } });
-    if (!r.ok) throw new Error(`No se pudo crear la sesión (${r.status})`);
-    const { ws_path } = await r.json();
+    const auth = { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" };
+    // 1) crear sesión  2) pedir conexión: el navegador solo recibe un ticket WS de 30 s y un solo uso;
+    // ni el JWT viaja en la URL ni la API key del proveedor sale del backend.
+    const created = await fetch(`${API}/api/v1/sessions`, {
+      method: "POST", headers: auth, body: JSON.stringify(this.agentId ? { agent_id: this.agentId } : {}),
+    });
+    if (!created.ok) throw new Error(`No se pudo crear la sesión (${created.status})`);
+    const { session_id } = await created.json();
+    const conn = await fetch(`${API}/api/v1/sessions/${session_id}/connect`, { method: "POST", headers: auth });
+    if (!conn.ok) throw new Error(`No se pudo preparar la conexión (${conn.status})`);
+    const { ws_path } = await conn.json();
 
     this.ctx = new AudioContext({ sampleRate: SR });
     await this.ctx.audioWorklet.addModule("/worklets/capture.js");

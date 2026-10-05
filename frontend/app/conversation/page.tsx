@@ -1,8 +1,8 @@
 "use client";
 import { useRef, useState } from "react";
+import { getToken } from "@/lib/api";
 import { AgentState, VoiceClient } from "@/lib/voiceClient";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const LABEL: Record<AgentState, string> = {
   idle: "Inactivo", connecting: "Conectando…", listening: "Escuchando", processing: "Procesando",
   responding: "Respondiendo", interrupted: "Interrumpido", error: "Error de conexión",
@@ -22,11 +22,10 @@ export default function Conversation() {
   async function toggle() {
     if (active) { await client.current?.stop(); return; }
     // Demo: token de desarrollo. En producción, el token proviene de tu proveedor de identidad.
-    const t = await fetch(`${API}/api/v1/auth/dev-token`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: "demo", org_id: "o1", role: "customer" }),
-    }).then((r) => r.json());
-    client.current = new VoiceClient(t.token, {
+    let token: string;
+    try { token = await getToken("customer"); } catch { setState("error"); return; }
+    setLines([]); setMetrics({});
+    client.current = new VoiceClient(token, {
       onState: setState,
       onTranscript: (who, text) => setLines((l) => [...l, { who, text }]),
       onMetrics: (m) => setMetrics((p) => ({ ...p, ...m })),

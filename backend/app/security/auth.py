@@ -1,4 +1,5 @@
 import time
+import uuid
 from dataclasses import dataclass
 
 import jwt
@@ -39,6 +40,11 @@ def decode_token(token: str) -> Principal:
         data = jwt.decode(token, s.jwt_secret, algorithms=[s.jwt_algorithm])
     except jwt.PyJWTError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido o expirado") from exc
+    if s.persistence_backend == "postgres":
+        try:
+            uuid.UUID(str(data["org"]))  # RLS compara contra uuid: rechazamos antes de llegar a la BD
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Organización inválida") from exc
     return Principal(user_id=data["sub"], org_id=data["org"], role=data["role"])
 
 

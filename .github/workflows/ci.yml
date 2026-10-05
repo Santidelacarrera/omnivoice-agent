@@ -3,6 +3,8 @@ on:
   push:
     branches: [main]
   pull_request:
+permissions:
+  contents: read
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -10,9 +12,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: backend/requirements.txt }
       - run: pip install -r requirements.txt
       - run: pytest -q
+      - name: Benchmark de humo del orquestador
+        run: python -m bench.orchestrator_bench --sessions 50 --rounds 3
+  migrations:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: omni, POSTGRES_PASSWORD: omni, POSTGRES_DB: omnivoice }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U omni" --health-interval 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Aplicar migraciones en orden
+        run: for f in migrations/*.sql; do psql "postgresql://omni:omni@localhost:5432/omnivoice" -v ON_ERROR_STOP=1 -f "$f"; done
+      - name: RLS aísla organizaciones y omni_app no es superusuario
+        run: |
+          export PGURL="postgresql://omni_app:omni_app@localhost:5432/omnivoice"
+          psql "postgresql://omni:omni@localhost:5432/omnivoice" -tAc "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname='omni_app'" | grep -qx f
+          [ "$(psql "$PGURL" -tAc "SET app.org_id='00000000-0000-0000-0000-000000000001'; SELECT count(*) FROM inventory" | tail -1)" -gt 0 ]
+          [ "$(psql "$PGURL" -tAc "SET app.org_id='00000000-0000-0000-0000-0000000000ff'; SELECT count(*) FROM inventory" | tail -1)" -eq 0 ]
   frontend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }
@@ -22,3 +45,5 @@ jobs:
         with: { node-version: "22" }
       - run: npm install
       - run: npm run typecheck
+      - run: npm run build
+        env: { NEXT_PUBLIC_API_URL: http://localhost:8000 }

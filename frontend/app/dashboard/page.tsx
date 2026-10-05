@@ -1,64 +1,72 @@
 "use client";
 import { useEffect, useState } from "react";
+import { api, MetricsResponse, Percentiles } from "@/lib/api";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const fmt = (v: number | null) => (v === null ? "—" : `${v} ms`);
 
-function parseProm(text: string, name: string) {
-  const re = new RegExp(`^${name}(?:\\{[^}]*\\})? ([0-9.e+-]+)$`, "gm");
-  let total = 0, m;
-  while ((m = re.exec(text))) total += parseFloat(m[1]);
-  return total;
+function PercentileCard({ title, p, target }: { title: string; p: Percentiles; target: string }) {
+  return (
+    <div className="rounded border p-4">
+      <div className="text-xs text-slate-500">{title}</div>
+      <div className="mt-1 grid grid-cols-3 gap-2 text-center">
+        {(["p50", "p95", "p99"] as const).map((k) => (
+          <div key={k}><div className="text-[10px] uppercase text-slate-400">{k}</div><div className="text-lg">{fmt(p[k])}</div></div>
+        ))}
+      </div>
+      <div className="mt-2 text-[11px] text-slate-400">Objetivo: {target} · {p.count} muestras</div>
+    </div>
+  );
 }
 
 export default function Dashboard() {
-  const [m, setM] = useState<Record<string, number>>({});
-  const [audit, setAudit] = useState<any[]>([]);
+  const [m, setM] = useState<MetricsResponse | null>(null);
+  const [audit, setAudit] = useState<{ ts: number; action: string; actor: string | null; detail: Record<string, unknown> }[]>([]);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
+    let alive = true;
     const tick = async () => {
-      const t = await fetch(`${API}/metrics`).then((r) => r.text());
-      const sum = parseProm(t, "omnivoice_first_audio_seconds_sum");
-      const cnt = parseProm(t, "omnivoice_first_audio_seconds_count");
-      setM({
-        sesiones: parseProm(t, "omnivoice_active_sessions"),
-        ttfbMedio: cnt ? Math.round((sum / cnt) * 1000) : 0,
-        errores: parseProm(t, "omnivoice_errors_total"),
-        paquetesPerdidos: parseProm(t, "omnivoice_packets_lost_total"),
-      });
-      const tok = (await fetch(`${API}/api/v1/auth/dev-token`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ user_id: "admin", org_id: "o1", role: "admin" }),
-      }).then((r) => r.json())).token;
-      const a = await fetch(`${API}/api/v1/audit-logs`, { headers: { Authorization: `Bearer ${tok}` } }).then((r) => r.json());
-      setAudit(a.items.slice(-20).reverse());
+      try {
+        const [metrics, logs] = await Promise.all([
+          api<MetricsResponse>("/api/v1/metrics", "admin"),
+          api<{ items: typeof audit }>("/api/v1/audit-logs?limit=25", "admin"),
+        ]);
+        if (!alive) return;
+        setM(metrics); setAudit(logs.items); setErr(null);
+      } catch (e) { if (alive) setErr((e as Error).message); }
     };
     tick();
     const id = setInterval(tick, 5000);
-    return () => clearInterval(id);
+    return () => { alive = false; clearInterval(id); };
   }, []);
 
-  const cards: [string, string | number][] = [
-    ["Sesiones activas", m.sesiones ?? 0],
-    ["Latencia media (1er audio)", `${m.ttfbMedio ?? 0} ms`],
-    ["Errores", m.errores ?? 0],
-    ["Paquetes perdidos", m.paquetesPerdidos ?? 0],
-  ];
   return (
-    <main className="mx-auto max-w-4xl p-6 space-y-6">
+    <main className="mx-auto max-w-5xl space-y-6 p-6">
       <h1 className="text-2xl font-semibold">Panel de administración</h1>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        {cards.map(([k, v]) => (
-          <div key={k} className="rounded border p-4"><div className="text-xs text-slate-500">{k}</div><div className="text-2xl">{v}</div></div>
-        ))}
-      </div>
+      {err && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-700">{err}</p>}
+      {m && (
+        <>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Sesiones activas</div><div className="text-2xl">{m.active_sessions}</div></div>
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Audio total</div><div className="text-2xl">{Math.round(m.usage.audio_seconds / 60)} min</div></div>
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Coste estimado</div><div className="text-2xl">${m.usage.estimated_cost_usd.toFixed(2)}</div></div>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <PercentileCard title="Latencia al primer audio" p={m.first_audio_ms} target="p50 < 500 ms (experimental)" />
+            <PercentileCard title="Silencio tras interrupción (servidor)" p={m.barge_in_ms} target="p95 < 200 ms" />
+          </div>
+        </>
+      )}
       <h2 className="text-lg font-medium">Auditoría reciente</h2>
       <table className="w-full text-sm">
-        <thead><tr className="text-left text-slate-500"><th>Hora</th><th>Evento</th><th>Detalle</th></tr></thead>
+        <thead><tr className="text-left text-slate-500"><th>Hora</th><th>Acción</th><th>Actor</th><th>Detalle</th></tr></thead>
         <tbody>
           {audit.map((e, i) => (
-            <tr key={i} className="border-t">
-              <td>{new Date(e.ts * 1000).toLocaleTimeString()}</td><td>{e.event}</td>
-              <td className="truncate max-w-xs">{JSON.stringify({ tool: e.tool, ok: e.ok })}</td>
+            <tr key={i} className="border-t align-top">
+              <td className="pr-3">{new Date(e.ts * 1000).toLocaleTimeString()}</td>
+              <td className="pr-3">{e.action}</td>
+              <td className="pr-3">{e.actor ?? "—"}</td>
+              <td className="max-w-md truncate text-slate-500">{JSON.stringify(e.detail)}</td>
             </tr>
           ))}
         </tbody>

@@ -92,7 +92,9 @@ class OpenAIRealtimeProvider:
 class FakeProvider:
     """Proveedor determinista para desarrollo sin clave y para tests."""
 
-    def __init__(self, script: list[dict[str, Any]] | None = None, audio_chunks: int = 20, chunk_delay: float = 0.02):
+    def __init__(self, script: list[dict[str, Any]] | None = None, audio_chunks: int = 20, chunk_delay: float = 0.02,
+                 respond_on_audio: bool = False):
+        self.respond_on_audio = respond_on_audio  # responde al primer audio recibido (tests de API/WS)
         self._q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
         self.script = script or []
         self.audio_chunks = audio_chunks
@@ -118,6 +120,8 @@ class FakeProvider:
 
     async def send_audio(self, pcm: bytes) -> None:
         self.received_audio += len(pcm)
+        if self.respond_on_audio and self._task is None:
+            self.trigger_response()
 
     async def send_tool_result(self, call_id, output) -> None:
         self.tool_results.append((call_id, output))

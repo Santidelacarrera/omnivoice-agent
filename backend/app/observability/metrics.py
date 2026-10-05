@@ -1,4 +1,6 @@
+import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import structlog
@@ -22,6 +24,32 @@ ERRORS = Counter("omnivoice_errors_total", "Errores", ["kind"])
 PACKETS_LOST = Counter("omnivoice_packets_lost_total", "Paquetes de audio perdidos (huecos de secuencia)")
 
 
+class LatencyWindow:
+    """Ventana deslizante de muestras para calcular p50/p95/p99 por proceso (sin dependencias)."""
+
+    def __init__(self, size: int = 2000) -> None:
+        self._d: deque[float] = deque(maxlen=size)
+
+    def add(self, v: float) -> None:
+        self._d.append(v)
+
+    def percentiles(self, scale: float = 1.0) -> dict[str, float | int | None]:
+        data = sorted(self._d)
+        n = len(data)
+        if n == 0:
+            return {"count": 0, "p50": None, "p95": None, "p99": None}
+
+        def pct(q: float) -> float:
+            idx = min(n - 1, max(0, math.ceil(q * n) - 1))  # método nearest-rank
+            return round(data[idx] * scale, 1)
+
+        return {"count": n, "p50": pct(0.50), "p95": pct(0.95), "p99": pct(0.99)}
+
+
+TTFB_WINDOW = LatencyWindow()
+BARGE_WINDOW = LatencyWindow()
+
+
 @dataclass
 class SessionMetrics:
     session_id: str
@@ -43,6 +71,7 @@ class SessionMetrics:
             self.first_audio_at = time.monotonic()
             ttfb = self.first_audio_at - self.user_speech_end
             TTFB.observe(ttfb)
+            TTFB_WINDOW.add(ttfb)
             return ttfb
         return None
 
@@ -55,6 +84,7 @@ class SessionMetrics:
             return None
         dt = time.monotonic() - self.barge_detected_at
         BARGE_IN.observe(dt)
+        BARGE_WINDOW.add(dt)
         self.barge_detected_at = None
         return dt
 

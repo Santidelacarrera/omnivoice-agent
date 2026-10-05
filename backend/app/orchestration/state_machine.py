@@ -14,7 +14,9 @@ class State(str, Enum):
 
 ALLOWED: dict[State, set[State]] = {
     State.IDLE: {State.LISTENING, State.COMPLETED, State.ERROR},
-    State.LISTENING: {State.PROCESSING, State.LISTENING, State.COMPLETED, State.ERROR},
+    # LISTENING -> RESPONDING/TOOL_RUNNING: el VAD del proveedor puede iniciar la respuesta
+    # antes de que nuestro VAD marque fin de habla.
+    State.LISTENING: {State.PROCESSING, State.RESPONDING, State.TOOL_RUNNING, State.LISTENING, State.COMPLETED, State.ERROR},
     State.PROCESSING: {State.RESPONDING, State.TOOL_RUNNING, State.LISTENING, State.COMPLETED, State.ERROR},
     State.RESPONDING: {State.LISTENING, State.INTERRUPTED, State.TOOL_RUNNING, State.COMPLETED, State.ERROR},
     State.TOOL_RUNNING: {State.PROCESSING, State.RESPONDING, State.INTERRUPTED, State.COMPLETED, State.ERROR},
