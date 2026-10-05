@@ -56,6 +56,7 @@ class VoiceSession:
         self._epoch = 0  # se incrementa en cada interrupción: descarta audio y resultados obsoletos
         self._agent_speaking = False
         self._closed = False
+        self._provider_failed = False
 
     async def _audit(self, action: str, detail: dict[str, Any] | None = None) -> None:
         d = {"session_id": self.id, "correlation_id": self.correlation_id, **(detail or {})}
@@ -97,7 +98,12 @@ class VoiceSession:
         elif event == "speech_end":
             self.metrics.mark_user_speech_end()
             self._set(State.PROCESSING)
-        await self.provider.send_audio(pcm)
+        if self._provider_failed:
+            return
+        try:
+            await self.provider.send_audio(pcm)
+        except Exception as exc:  # noqa: BLE001 - el proveedor cerró o rechazó la conexión
+            await self._provider_failure("send_audio", exc)
 
     async def on_client_event(self, msg: dict[str, Any]) -> None:
         # El cliente avisa cuando su VAD local detecta voz (más rápido que el servidor).
@@ -128,11 +134,15 @@ class VoiceSession:
         try:
             async for ev in self.provider.events():
                 await self._on_provider_event(ev)
+            if not self._closed and not self._provider_failed:
+                # El proveedor cerró el flujo sin error: sin esto el usuario se queda hablando al vacío.
+                await self._provider_failure("stream_closed", None)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
             ERRORS.labels("provider_loop").inc()
             log.exception("provider_loop_failed", session=self.id)
+            self._provider_failed = True
             self._set(State.ERROR)
             await self.send({"type": "error", "message": "provider_unavailable"})
             await self._audit("session.provider_error")
@@ -164,7 +174,20 @@ class VoiceSession:
             await self.send({"type": "state", "state": self.sm.state.value})
         elif t == "error":
             ERRORS.labels("provider_event").inc()
+            log.warning("provider_error_event", session=self.id, message=str(ev.get("message"))[:300])
             await self.send({"type": "error", "message": ev["message"]})
+
+    async def _provider_failure(self, where: str, exc: Exception | None) -> None:
+        """Registra el motivo real (visible en `docker compose logs backend`) y avisa una sola vez al cliente."""
+        if self._provider_failed:
+            return
+        self._provider_failed = True
+        ERRORS.labels("provider_loop").inc()
+        log.warning("provider_failed", session=self.id, where=where,
+                    error=type(exc).__name__ if exc else "closed", detail=str(exc)[:300] if exc else "")
+        self._set(State.ERROR)
+        await self.send({"type": "error", "message": "provider_unavailable"})
+        await self._audit("session.provider_error", {"where": where})
 
     async def _run_tool(self, ev: dict[str, Any], epoch: int) -> None:
         self._set(State.TOOL_RUNNING)
