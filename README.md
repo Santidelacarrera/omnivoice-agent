@@ -78,7 +78,7 @@ La clave real va **solo en `.env`** (ignorado por Git), nunca en `.env.example`.
 
 | Qué | Dónde |
 |---|---|
-| Conversación en vivo | http://localhost:3010/conversation (puerto configurable con `FRONTEND_PORT`) |
+| Conversación en vivo | http://localhost:4310/conversation (puerto configurable con `FRONTEND_PORT`) |
 | Panel, agentes, historial, configuración | `/dashboard` · `/agents` · `/history` · `/settings` |
 | API + OpenAPI | http://localhost:8010/docs (puerto configurable con `BACKEND_PORT`) |
 | Métricas Prometheus / Grafana | `:8010/metrics` · `:9090` · `:3001` |
