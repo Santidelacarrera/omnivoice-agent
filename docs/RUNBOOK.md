@@ -33,6 +33,6 @@ periódicamente `DELETE FROM transcripts WHERE ts < now() - interval '30 days'` 
 
 ## Pruebas de rendimiento
 - Orquestador aislado (sin red): `python -m bench.orchestrator_bench --sessions 200`.
-- Extremo a extremo: levantar el stack y `python -m bench.loadtest --url http://localhost:8000 --clients 50 --duration 20`.
+- Extremo a extremo: levantar el stack y `python -m bench.loadtest --url http://localhost:8010 --clients 50 --duration 20`.
   Con el proveedor simulado mide tu stack; con `OPENAI_API_KEY` mide también al proveedor y la red.
   Sube `--clients` hasta ver 429 o aumento de p95 para fijar la capacidad por réplica.

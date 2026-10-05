@@ -80,8 +80,8 @@ La clave real va **solo en `.env`** (ignorado por Git), nunca en `.env.example`.
 |---|---|
 | Conversación en vivo | http://localhost:3000/conversation |
 | Panel, agentes, historial, configuración | `/dashboard` · `/agents` · `/history` · `/settings` |
-| API + OpenAPI | http://localhost:8000/docs |
-| Métricas Prometheus / Grafana | `:8000/metrics` · `:9090` · `:3001` |
+| API + OpenAPI | http://localhost:8010/docs (puerto configurable con `BACKEND_PORT`) |
+| Métricas Prometheus / Grafana | `:8010/metrics` · `:9090` · `:3001` |
 
 `docker compose` levanta PostgreSQL (aplicando las migraciones `001`–`003`), Redis, backend, frontend, Prometheus y
 Grafana, todos con *healthchecks*.
@@ -205,7 +205,7 @@ Ver [`.env.example`](.env.example). Variables principales:
 ```bash
 cd backend && pytest -q                                   # unitarias, servicios, API y WebSocket
 python -m bench.orchestrator_bench --sessions 200         # overhead del orquestador (sin red)
-python -m bench.loadtest --url http://localhost:8000 --clients 50 --duration 20   # extremo a extremo
+python -m bench.loadtest --url http://localhost:8010 --clients 50 --duration 20   # extremo a extremo
 cd ../frontend && npm run typecheck && npm run build
 ```
 
