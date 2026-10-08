@@ -266,7 +266,7 @@ def test_org_policy_blocks_recording(tmp_path):
     assert r["recording"] is False
 
 
-def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp_path):
+def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp_path, capfd):
     app, c = api_client(tmp_path)
     h = auth()
     sess = c.post("/api/v1/sessions", json={"recording_consent": True, "voice": "alloy", "language": "es"}, headers=h).json()
@@ -294,7 +294,7 @@ def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp
                 if fr:
                     out.append(fr)
             return out
-        assert False, ("TASKS", c.portal.call(dump), acts)
+        assert False, ("LOGS", capfd.readouterr().out[-2500:].replace(chr(10), " | "), acts)
     assert r.status_code == 200, (r.text, acts)
     assert r.content[:4] == b"RIFF" and r.headers["content-type"] == "audio/wav"
     assert "recording.accessed" in [a["action"] for a in app.state.db.audits]
