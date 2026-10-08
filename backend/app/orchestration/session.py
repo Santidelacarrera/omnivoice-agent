@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.observability.metrics import ACTIVE_SESSIONS, ERRORS, SessionMetrics
 from app.orchestration.state_machine import InvalidTransition, SessionStateMachine, State
 from app.realtime.provider import RealtimeProvider
-from app.realtime.vad import VoiceActivityDetector
+from app.realtime.vad import create_vad
 from app.security.auth import Principal
 from app.services.persistence import InMemoryPersistence, Persistence
 from app.tools.registry import ToolRegistry
@@ -48,7 +48,8 @@ class VoiceSession:
         self.on_close = on_close
         self.sm = SessionStateMachine()
         self.metrics = SessionMetrics(self.id, principal.org_id)
-        self.vad = VoiceActivityDetector(settings.vad_energy_threshold, settings.vad_min_speech_ms, settings.sample_rate)
+        self.vad = create_vad(settings)
+        self._hint_task: asyncio.Task | None = None
         self.conversation_id: str | None = None
         self.first_audio_ms: int | None = None
         self._audio_in_bytes = 0
@@ -96,6 +97,7 @@ class VoiceSession:
             self.metrics.track_seq(seq)
         event = self.vad.feed(pcm)
         if event == "speech_start":
+            self._cancel_hint()  # el servidor confirmó voz: la interrupción se resuelve aquí
             await self.handle_barge_in()
         elif event == "speech_end":
             self.metrics.mark_user_speech_end()
@@ -110,14 +112,42 @@ class VoiceSession:
     async def on_client_event(self, msg: dict[str, Any]) -> None:
         # El cliente avisa cuando su VAD local detecta voz (más rápido que el servidor).
         if msg.get("type") == "barge_in":
-            await self.handle_barge_in()
+            await self._on_barge_in_hint()
         elif msg.get("type") == "end":
             await self.close()
 
-    async def handle_barge_in(self) -> None:
+    async def _on_barge_in_hint(self) -> None:
+        """Pista del navegador: su VAD (por energía) oyó algo y ya pausó la reproducción.
+
+        Con VAD de modelo en el servidor, la pista no basta: se interrumpe solo si el servidor confirma voz
+        en `barge_in_confirm_ms`; si era ruido, se ordena reanudar el audio. Con VAD por energía no hay un
+        segundo criterio mejor, así que se interrumpe de inmediato como antes.
+        """
+        from app.realtime.vad import ModelVoiceActivityDetector
+
+        if not isinstance(self.vad, ModelVoiceActivityDetector) or self.vad.speaking:
+            if not await self.handle_barge_in():
+                await self.send({"type": "audio.resume"})
+            return
+        self._cancel_hint()
+        self._hint_task = self._spawn(self._hint_timeout())
+
+    def _cancel_hint(self) -> None:
+        if self._hint_task and not self._hint_task.done() and self._hint_task is not asyncio.current_task():
+            self._hint_task.cancel()
+        self._hint_task = None
+
+    async def _hint_timeout(self) -> None:
+        await asyncio.sleep(self.settings.barge_in_confirm_ms / 1000)
+        self._hint_task = None
+        ERRORS.labels("barge_in_unconfirmed").inc()  # ruido o eco que el navegador tomó por voz
+        await self.send({"type": "audio.resume"})
+
+    async def handle_barge_in(self) -> bool:
+        """Interrumpe al agente si está hablando. Devuelve True si hubo algo que interrumpir."""
         if not (self._agent_speaking or self.sm.state in (State.RESPONDING, State.TOOL_RUNNING)):
             self._set(State.LISTENING)
-            return
+            return False
         self.metrics.mark_barge_detected()
         self._epoch += 1
         self._agent_speaking = False
@@ -130,6 +160,7 @@ class VoiceSession:
             await self.db.add_event(self.principal.org_id, self.conversation_id, "barge_in",
                                     {"server_silence_s": dt}, self.correlation_id)
         self._set(State.LISTENING)
+        return True
 
     # ---- eventos del proveedor ----
     async def _provider_loop(self) -> None:

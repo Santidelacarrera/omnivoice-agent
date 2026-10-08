@@ -18,7 +18,7 @@ def frame(seq: int, pcm: bytes = LOUD) -> bytes:
 
 
 def make_client(**overrides):
-    settings = Settings(environment="test", jwt_secret="t" * 40, **overrides)
+    settings = Settings(environment="test", jwt_secret="t" * 40, **{"vad_backend": "energy", **overrides})
     app = create_app(settings, provider_factory=lambda: FakeProvider(audio_chunks=5, respond_on_audio=True))
     return TestClient(app)
 

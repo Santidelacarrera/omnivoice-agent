@@ -51,7 +51,7 @@ async def one_session(idx: int, rounds: int, barge: LatencyWindow, frames: list[
 
 
 async def main(n: int, rounds: int) -> None:
-    settings = Settings(environment="test", sample_rate=24000)
+    settings = Settings(environment="test", sample_rate=24000, vad_backend="energy")
     registry = build_registry(InMemoryRepository())
     db = InMemoryPersistence()
     barge, frames = LatencyWindow(size=n * rounds + 10), []

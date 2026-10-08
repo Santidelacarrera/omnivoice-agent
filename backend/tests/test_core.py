@@ -24,7 +24,7 @@ def make_session(provider=None):
         sent.append(m)
 
     prov = provider or FakeProvider()
-    s = VoiceSession(P, prov, build_registry(InMemoryRepository()), send, Settings(sample_rate=24000))
+    s = VoiceSession(P, prov, build_registry(InMemoryRepository()), send, Settings(sample_rate=24000, vad_backend="energy"))
     return s, prov, sent
 
 

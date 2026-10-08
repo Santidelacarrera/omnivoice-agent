@@ -34,8 +34,14 @@ class Settings(BaseSettings):
     max_ws_frame_bytes: int = 16384  # un frame PCM de 20 ms ocupa ~960 B; este tope frena abuso
     max_session_seconds: int = 1800
     tool_timeout_seconds: float = 8.0
+    # VAD del servidor: "webrtc" (modelo, por defecto) o "energy". Si el módulo nativo falta, cae a energía.
+    vad_backend: Literal["webrtc", "energy"] = "webrtc"
+    vad_aggressiveness: int = 2  # 0 (permisivo) .. 3 (muy estricto con el ruido)
     vad_energy_threshold: float = 0.015
     vad_min_speech_ms: int = 120
+    vad_hangover_ms: int = 600
+    # El navegador solo pausa el audio al detectar voz; si el servidor no la confirma en este plazo, se reanuda.
+    barge_in_confirm_ms: int = 400
     sample_rate: int = 24000
 
     @model_validator(mode="after")

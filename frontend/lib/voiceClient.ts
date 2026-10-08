@@ -83,11 +83,11 @@ export class VoiceClient {
   }
 
   private localBargeIn() {
+    // Pausa inmediata (el usuario oye silencio en ms) y pista al servidor. El servidor confirma con su VAD de
+    // modelo ("audio.clear") o lo descarta como ruido ("audio.resume"); así el ruido de fondo no corta al agente.
     this.bargeAt = performance.now();
-    this.agentSpeaking = false;
-    this.playback?.port.postMessage({ type: "clear" });
+    this.playback?.port.postMessage({ type: "pause" });
     this.ws?.send(JSON.stringify({ type: "barge_in" }));
-    this.ev.onState("interrupted");
   }
 
   private onMessage(m: MessageEvent) {
@@ -100,7 +100,12 @@ export class VoiceClient {
     const msg = JSON.parse(m.data);
     switch (msg.type) {
       case "session.ready": this.ev.onState("listening"); break;
-      case "audio.clear": this.agentSpeaking = false; this.playback?.port.postMessage({ type: "clear" }); break;
+      case "audio.clear":
+        this.agentSpeaking = false;
+        this.playback?.port.postMessage({ type: "clear" });
+        this.ev.onState("interrupted");
+        break;
+      case "audio.resume": this.bargeAt = 0; this.playback?.port.postMessage({ type: "resume" }); break;
       case "transcript_user": this.ev.onTranscript("user", msg.text); break;
       case "transcript_agent": this.ev.onTranscript("agent", msg.text); break;
       case "metrics": this.ev.onMetrics({ firstAudioMs: msg.first_audio_ms }); break;
