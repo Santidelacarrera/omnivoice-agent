@@ -4,6 +4,8 @@ Cada cliente virtual: crea sesión -> connect -> abre WS -> envía habla sintét
 mide tiempo hasta el primer frame de audio de respuesta -> interrumpe y mide hasta 'audio.clear'.
 Imprime p50/p95/p99 y cuántas sesiones fueron rechazadas (429) para estimar capacidad concurrente.
 
+La voz sintética es una onda cuadrada: un VAD de modelo (webrtc) no la toma por voz humana, así que
+mide con VAD_BACKEND=energy en el servidor; el VAD de modelo se evalúa con audio real.
 Con OPENAI_API_KEY vacío el backend usa el proveedor simulado: sirve para medir tu stack, no al proveedor.
 Uso:  python -m bench.loadtest --url http://localhost:8000 --clients 50 --duration 20
 Requiere el backend con ENVIRONMENT=development (usa /auth/dev-token).
@@ -64,6 +66,9 @@ async def client(i: int, base: str, duration: float, first_audio: list[float], b
                             got = True
                             t_b = time.perf_counter()
                             await ws.send(json.dumps({"type": "barge_in"}))
+                            # El servidor confirma la interrupción con su propio VAD: hay que seguir "hablando".
+                            for _ in range(10):
+                                await ws.send(struct.pack(">I", seq) + SPEECH); seq += 1
                         elif isinstance(m, str) and json.loads(m).get("type") == "audio.clear":
                             barge.append(time.perf_counter() - t_b)
                             break

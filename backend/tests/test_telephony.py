@@ -6,6 +6,7 @@ import json
 import math
 
 import pytest
+from urllib.parse import urlencode
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
@@ -78,7 +79,7 @@ def make(provider=None, **over):
 
 
 def signed_post(c, params):
-    return c.post("/telephony/voice", content="&".join(f"{k}={v}" for k, v in params.items()),
+    return c.post("/telephony/voice", content=urlencode(params),
                   headers={"content-type": "application/x-www-form-urlencoded",
                            "x-twilio-signature": compute_signature("tok", f"{PUBLIC}/telephony/voice", params)})
 
