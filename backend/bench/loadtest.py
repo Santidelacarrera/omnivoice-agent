@@ -74,16 +74,23 @@ async def client(i: int, base: str, duration: float, first_audio: list[float], b
         stats["errors"] += 1
 
 
-async def main(base: str, clients: int, duration: float) -> None:
+async def main(base: str, clients: int, duration: float, out: str | None = None, mode: str = "unspecified",
+               label: str = "") -> None:
     first_audio: list[float] = []
     barge: list[float] = []
     stats = {"connected": 0, "rejected": 0, "timeouts": 0, "errors": 0}
     await asyncio.gather(*(client(i, base, duration, first_audio, barge, stats) for i in range(clients)))
-    print(json.dumps({
+    result = {
+        "meta": {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "url": base, "duration_s": duration,
+                 "provider_mode": mode, "label": label},
         "clients": clients, **stats,
         "first_audio_ms": {"count": len(first_audio), "p50": pct(first_audio, .5), "p95": pct(first_audio, .95), "p99": pct(first_audio, .99)},
         "barge_in_roundtrip_ms": {"count": len(barge), "p50": pct(barge, .5), "p95": pct(barge, .95), "p99": pct(barge, .99)},
-    }, indent=2))
+    }
+    print(json.dumps(result, indent=2))
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
 
 
 if __name__ == "__main__":
@@ -91,5 +98,9 @@ if __name__ == "__main__":
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--clients", type=int, default=25)
     ap.add_argument("--duration", type=float, default=15)
+    ap.add_argument("--out", help="guarda el resultado en JSON (entrada de bench.report)")
+    ap.add_argument("--mode", choices=["real", "simulated", "unspecified"], default="unspecified",
+                    help="real = OPENAI_API_KEY con crédito; simulated = proveedor falso (mide solo tu stack)")
+    ap.add_argument("--label", default="", help="p. ej. 'VM 2 vCPU, VAD_BACKEND=energy'")
     a = ap.parse_args()
-    asyncio.run(main(a.url, a.clients, a.duration))
+    asyncio.run(main(a.url, a.clients, a.duration, a.out, a.mode, a.label))
