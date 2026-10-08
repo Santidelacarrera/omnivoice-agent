@@ -363,6 +363,8 @@ def create_app(
                         await session.on_client_event(json.loads(m["text"]))
                     except json.JSONDecodeError:
                         continue
+                    if session._closed:  # el cliente pidió terminar ("end"): no se espera más tráfico
+                        break
         except (WebSocketDisconnect, asyncio.TimeoutError):
             pass
         finally:

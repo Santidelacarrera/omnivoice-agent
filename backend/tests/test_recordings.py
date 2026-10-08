@@ -234,6 +234,23 @@ def stream_then_end(ws, frames=6):
         if ws.receive().get("bytes"):
             break
     ws.send_text('{"type":"end"}')
+    # El servidor avisa con "session.closed" cuando terminó de guardar la grabación. Un temporizador evita
+    # que el test se cuelgue para siempre si el cierre no llega.
+    import signal
+
+    def _timeout(*_):
+        raise TimeoutError("el servidor no confirmó el cierre de la sesión")
+
+    old = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(20)
+    try:
+        for _ in range(200):
+            m = ws.receive()
+            if m.get("text") and '"session.closed"' in m["text"]:
+                break
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
 
 
 def wait_closed(app, timeout=5.0):

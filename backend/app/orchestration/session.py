@@ -357,3 +357,7 @@ class VoiceSession:
         await self._audit("session.completed", summary)
         if self.on_close:
             await self.on_close(self)
+        try:  # el cliente sabe así que la grabación ya está guardada y que puede colgar
+            await self.send({"type": "session.closed", "final_state": final_name})
+        except Exception:  # noqa: BLE001 - el socket puede estar ya cerrado
+            pass
