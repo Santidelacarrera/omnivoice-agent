@@ -266,7 +266,7 @@ def test_org_policy_blocks_recording(tmp_path):
     assert r["recording"] is False
 
 
-def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp_path, capfd):
+def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp_path):
     app, c = api_client(tmp_path)
     h = auth()
     sess = c.post("/api/v1/sessions", json={"recording_consent": True, "voice": "alloy", "language": "es"}, headers=h).json()
@@ -289,18 +289,16 @@ def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp
         async def dump():
             out = []
             for t in _a.all_tasks():
-                fr = [f"{f.f_code.co_name}@{f.f_code.co_filename.split('/')[-1]}:{f.f_lineno}" for f in t.get_stack(limit=12)]
-                fr = [x for x in fr if x.split("@")[1].split(":")[0] in ("main.py", "session.py", "recordings.py", "provider.py", "vad.py")]
-                if fr:
-                    out.append(fr)
+                co, chain = t.get_coro(), []
+                while co is not None:
+                    fr = getattr(co, "cr_frame", None) or getattr(co, "ag_frame", None) or getattr(co, "gi_frame", None)
+                    if fr is not None:
+                        chain.append(f"{fr.f_code.co_name}:{fr.f_code.co_filename.split('/')[-1]}:{fr.f_lineno}")
+                    co = getattr(co, "cr_await", None) or getattr(co, "ag_await", None) or getattr(co, "gi_yieldfrom", None)
+                if any(("main.py" in c or "session.py" in c or "recordings.py" in c) for c in chain):
+                    out.append(chain[-6:])
             return out
-        import faulthandler
-        import sys as _s
-        capfd.readouterr()
-        faulthandler.dump_traceback(file=_s.stderr, all_threads=True)
-        err = capfd.readouterr().err
-        keep = [l.strip().replace("File ", "")[-70:] for l in err.splitlines() if "/backend/" in l or "Thread" in l]
-        assert False, ("STACKS", " | ".join(keep)[:1500], acts)
+        assert False, ("CHAINS", c.portal.call(dump), acts)
     assert r.status_code == 200, (r.text, acts)
     assert r.content[:4] == b"RIFF" and r.headers["content-type"] == "audio/wav"
     assert "recording.accessed" in [a["action"] for a in app.state.db.audits]
