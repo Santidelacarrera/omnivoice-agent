@@ -50,3 +50,9 @@ export interface ConversationDetail extends ConversationRow {
   tools: { tool_name?: string; tool?: string; ok: boolean | null; duration_ms: number | null }[];
 }
 export interface Agent { id: string; name: string; instructions: string; tools: string[]; voice: string | null; language: string }
+
+export interface Catalog {
+  voices: string[];
+  languages: { code: string; name: string }[];
+  recording: { available: boolean };
+}
