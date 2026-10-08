@@ -222,6 +222,17 @@ def auth(role="customer", org="o1", user="u1"):
     return {"Authorization": f"Bearer {issue_token(user, org, role)}"}
 
 
+def wait_closed(app, timeout=5.0):
+    """El cierre de la sesión corre en el servidor tras salir del `with` del cliente: se espera a su auditoría."""
+    import time
+
+    end = time.time() + timeout
+    while time.time() < end:
+        if "session.completed" in [a["action"] for a in app.state.db.audits]:
+            return
+        time.sleep(0.02)
+
+
 def test_catalog_lists_voices_languages_and_recording_availability(tmp_path):
     _, c = api_client(tmp_path)
     cat = c.get("/api/v1/catalog", headers=auth()).json()
@@ -263,6 +274,7 @@ def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp
         for i in range(6):
             ws.send_bytes(struct.pack(">I", i) + LOUD)
         ws.send_text('{"type":"end"}')
+    wait_closed(app)
     cid = c.get("/api/v1/conversations", headers=auth("operator")).json()["items"][0]["id"]
     assert c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("operator")).status_code == 403
     r = c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("admin"))
@@ -281,5 +293,7 @@ def test_other_org_cannot_download_recording(tmp_path):
         ws.receive_json()
         ws.send_bytes(struct.pack(">I", 0) + LOUD)
         ws.send_text('{"type":"end"}')
+    wait_closed(app)
     cid = c.get("/api/v1/conversations", headers=auth("operator", org="o1")).json()["items"][0]["id"]
+    assert c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("admin", org="o1")).status_code == 200  # existe
     assert c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("admin", org="o2")).status_code == 404
