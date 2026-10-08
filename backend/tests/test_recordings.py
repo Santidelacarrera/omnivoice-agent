@@ -212,10 +212,14 @@ async def test_storage_failure_does_not_break_session_close(tmp_path):
 
 # ---------- API: catálogo, validación y flujo con grabación ----------
 def api_client(tmp_path, **overrides):
-    settings = Settings(environment="test", jwt_secret="t" * 40, vad_backend="energy", recording_storage="local",
+    settings = Settings(environment="test", jwt_secret="t" * 40, vad_backend="energy", retention_job_enabled=False, recording_storage="local",
                         recording_local_dir=str(tmp_path), **overrides)
     app = create_app(settings, provider_factory=lambda: FakeProvider(audio_chunks=3, respond_on_audio=True))
-    return app, TestClient(app)
+    # Con el contexto abierto el TestClient mantiene un único bucle: el cierre de la sesión (que guarda la
+    # grabación) sigue ejecutándose en el servidor después de salir del `with` del WebSocket.
+    client = TestClient(app)
+    client.__enter__()
+    return app, client
 
 
 def auth(role="customer", org="o1", user="u1"):
