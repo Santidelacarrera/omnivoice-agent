@@ -11,12 +11,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.catalog import LANGUAGE_NAMES
 from app.core.config import Settings, get_settings
 from app.observability.metrics import BARGE_WINDOW, ERRORS, TTFB_WINDOW
-from app.orchestration.session import VoiceSession
+from app.orchestration.session import SessionOptions, VoiceSession
 from app.realtime.provider import FakeProvider, OpenAIRealtimeProvider, RealtimeProvider
 from app.security.auth import Principal, issue_token, require
 from app.services.persistence import InMemoryPersistence, Persistence
+from app.services.recordings import RecordingStorage, build_storage
+from app.services.retention import InMemoryRetentionBackend, RetentionBackend, RetentionJob
 from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore
 from app.tools.handlers import DEMO_ORG, InMemoryRepository, Repository, build_registry
 
@@ -31,6 +34,9 @@ IDLE_TIMEOUT_S = 60
 class CreateSessionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     agent_id: str | None = None
+    voice: str | None = Field(default=None, max_length=40)
+    language: str | None = Field(default=None, pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
+    recording_consent: bool = False  # consentimiento explícito de grabación; por defecto NO
 
 
 class CreateAgentBody(BaseModel):
@@ -55,12 +61,17 @@ def create_app(
     store: StateStore | None = None,
     repository: Repository | None = None,
     provider_factory: Callable[[], RealtimeProvider] | None = None,
+    recording_storage: RecordingStorage | None = None,
+    retention_backend: RetentionBackend | None = None,
 ) -> FastAPI:
     s = settings or get_settings()
     live: dict[str, VoiceSession] = {}
+    storage: RecordingStorage | None = recording_storage if recording_storage is not None else build_storage(s)
+    retention_job: RetentionJob | None = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        nonlocal retention_job
         redis_client = None
         if persistence is None and s.persistence_backend == "postgres":
             from app.database.engine import init_engine
@@ -75,7 +86,24 @@ def create_app(
 
             redis_client = aioredis.from_url(s.redis_url, decode_responses=True)
             app.state.store = RedisStateStore(redis_client)
+        if s.retention_job_enabled:
+            backend = retention_backend
+            if backend is None:
+                if s.persistence_backend == "postgres" and persistence is None:
+                    from app.services.retention_pg import PostgresRetentionBackend
+
+                    backend = PostgresRetentionBackend()
+                elif isinstance(app.state.db, InMemoryPersistence):
+                    backend = InMemoryRetentionBackend(app.state.db, s.memory_retention_days)
+            if backend is not None:
+                retention_job = RetentionJob(backend, storage, lambda *a: app.state.db.audit(*a),
+                                             lambda name, ttl: app.state.store.acquire_lock(name, ttl),
+                                             s.retention_interval_seconds, s.retention_batch_size)
+                app.state.retention = retention_job
+                retention_job.start()
         yield
+        if retention_job:
+            await retention_job.stop()
         # Cierre ordenado: finaliza sesiones vivas para no perder conversaciones ni consumo.
         await asyncio.gather(*(sess.close() for sess in list(live.values())), return_exceptions=True)
         if redis_client:
@@ -160,21 +188,44 @@ def create_app(
             raise HTTPException(404, "Agente no encontrado")
         if await app.state.store.active_sessions(p.org_id) >= s.max_sessions_per_org:
             raise HTTPException(429, "Capacidad de la organización agotada")
+        voice = body.voice if body else None
+        language = body.language if body else None
+        if voice and voice not in s.allowed_voices:
+            raise HTTPException(422, f"Voz no disponible: {voice}")
+        if language and language.split("-")[0] not in s.allowed_languages:
+            raise HTTPException(422, f"Idioma no disponible: {language}")
+        wants_recording = bool(body and body.recording_consent)
+        recording = wants_recording and storage is not None and (await app.state.db.org_policy(p.org_id))["recording_enabled"]
         session_id = uuid.uuid4().hex
         await app.state.store.put_ticket(f"sess:{session_id}", p, 300, agent_id)
-        await app.state.db.audit(p.org_id, p.user_id, "session.created", {"session_id": session_id, "agent_id": agent_id})
-        return {"session_id": session_id, "expires_in": 300}
+        await app.state.store.put_session_options(
+            f"sess:{session_id}", {"recording_consent": recording, "voice": voice, "language": language}, 300)
+        await app.state.db.audit(p.org_id, p.user_id, "session.created",
+                                 {"session_id": session_id, "agent_id": agent_id, "voice": voice, "language": language,
+                                  "recording_requested": wants_recording, "recording_granted": recording})
+        return {"session_id": session_id, "expires_in": 300, "recording": recording, "voice": voice, "language": language}
 
     @app.post("/api/v1/sessions/{session_id}/connect")
     async def connect_session(session_id: str, p: Principal = Depends(authed("session:create"))):
         entry = await app.state.store.take_ticket(f"sess:{session_id}")
         if not entry or entry[0].org_id != p.org_id or entry[0].user_id != p.user_id:
             raise HTTPException(404, "Sesión no encontrada o expirada")
+        options = await app.state.store.take_session_options(f"sess:{session_id}")
         ticket = uuid.uuid4().hex
         # Ticket WS de un solo uso y vida corta: el JWT nunca viaja en la URL.
         await app.state.store.put_ticket(ticket, p, s.ws_ticket_ttl_seconds, entry[1])
+        await app.state.store.put_session_options(ticket, options, s.ws_ticket_ttl_seconds)
         return {"ticket": ticket, "ws_path": f"/ws/audio?ticket={ticket}", "expires_in": s.ws_ticket_ttl_seconds,
                 "audio": {"format": "pcm16", "sample_rate": s.sample_rate, "channels": 1, "frame_ms": 20}}
+
+    @app.get("/api/v1/catalog")
+    async def catalog(p: Principal = Depends(authed("session:create"))):
+        policy = await app.state.db.org_policy(p.org_id)
+        return {
+            "voices": s.allowed_voices,
+            "languages": [{"code": c, "name": LANGUAGE_NAMES.get(c, c)} for c in s.allowed_languages],
+            "recording": {"available": storage is not None and policy["recording_enabled"]},
+        }
 
     # ---------- conversaciones, agentes, métricas, auditoría ----------
     @app.get("/api/v1/conversations")
@@ -187,6 +238,20 @@ def create_app(
         if not conv:
             raise HTTPException(404, "Conversación no encontrada")
         return conv
+
+    @app.get("/api/v1/conversations/{conversation_id}/recording")
+    async def conversation_recording(conversation_id: str, p: Principal = Depends(authed("recordings:read"))):
+        rec = await app.state.db.get_recording(p.org_id, conversation_id)
+        if not rec or storage is None:
+            raise HTTPException(404, "Esta conversación no tiene grabación")
+        await app.state.db.audit(p.org_id, p.user_id, "recording.accessed", {"conversation_id": conversation_id})
+        url = await storage.presigned_url(rec["storage_key"], s.recording_url_ttl_seconds)
+        if url:
+            return {"url": url, "expires_in": s.recording_url_ttl_seconds, "duration_s": rec["duration_s"]}
+        data = await storage.get(rec["storage_key"])
+        if data is None:
+            raise HTTPException(404, "Grabación no disponible")
+        return Response(data, media_type="audio/wav", headers={"Content-Disposition": f'attachment; filename="{conversation_id}.wav"'})
 
     @app.get("/api/v1/agents")
     async def list_agents(p: Principal = Depends(authed("agents:read"))):
@@ -236,6 +301,11 @@ def create_app(
             return
         principal, agent_id = entry
         agent = await app.state.db.get_agent(principal.org_id, agent_id) if agent_id else None
+        opts = await app.state.store.take_session_options(ticket)
+        options = SessionOptions(
+            recording_consent=bool(opts.get("recording_consent")),
+            voice=opts.get("voice") or (agent or {}).get("voice"),
+            language=opts.get("language") or (agent or {}).get("language"))
         session_key = uuid.uuid4().hex
         if not await app.state.store.acquire_session(principal.org_id, session_key, s.max_sessions_per_org):
             await ws.close(code=WS_CLOSE_CAPACITY)
@@ -260,7 +330,8 @@ def create_app(
                 principal, make_provider(), registry, send, s, persistence=app.state.db,
                 instructions=agent["instructions"] if agent else "Eres un agente de atención al cliente. Responde breve y usa herramientas para datos reales.",
                 allowed_tools=set(agent["tools"]) if agent and agent["tools"] else None,
-                on_close=on_close,
+                on_close=on_close, options=options, recording_storage=storage,
+                recording_allowed=options.recording_consent,  # ya validado contra la política en create_session
             )
             live[session_key] = session
             try:

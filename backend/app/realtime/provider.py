@@ -15,7 +15,8 @@ from app.core.config import Settings
 
 
 class RealtimeProvider(Protocol):
-    async def connect(self, instructions: str, tools: list[dict[str, Any]]) -> None: ...
+    async def connect(self, instructions: str, tools: list[dict[str, Any]], voice: str | None = None,
+                      language: str | None = None) -> None: ...
     async def send_audio(self, pcm: bytes) -> None: ...
     async def send_tool_result(self, call_id: str, output: dict[str, Any]) -> None: ...
     async def cancel_response(self) -> None: ...
@@ -28,24 +29,26 @@ class OpenAIRealtimeProvider:
         self.s = settings
         self.ws: websockets.WebSocketClientProtocol | None = None
 
-    async def connect(self, instructions: str, tools: list[dict[str, Any]]) -> None:
+    async def connect(self, instructions: str, tools: list[dict[str, Any]], voice: str | None = None,
+                      language: str | None = None) -> None:
         url = f"{self.s.openai_realtime_url}?model={self.s.openai_realtime_model}"
         self.ws = await websockets.connect(
             url, extra_headers={"Authorization": f"Bearer {self.s.openai_api_key}"}, max_size=2**22
         )
-        await self._send(
-            {
-                "type": "session.update",
-                "session": {
-                    "instructions": instructions,
-                    "tools": tools,
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
-                    "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
-                    "input_audio_transcription": {"model": "whisper-1"},
-                },
-            }
-        )
+        transcription: dict[str, Any] = {"model": "whisper-1"}
+        if language:
+            transcription["language"] = language.split("-")[0]  # ISO-639-1: mejora la transcripción
+        session: dict[str, Any] = {
+            "instructions": instructions,
+            "tools": tools,
+            "input_audio_format": "pcm16",
+            "output_audio_format": "pcm16",
+            "turn_detection": {"type": "server_vad", "create_response": True, "interrupt_response": True},
+            "input_audio_transcription": transcription,
+        }
+        if voice:
+            session["voice"] = voice
+        await self._send({"type": "session.update", "session": session})
 
     async def _send(self, msg: dict[str, Any]) -> None:
         assert self.ws is not None
@@ -104,8 +107,8 @@ class FakeProvider:
         self.tool_results: list[tuple[str, dict[str, Any]]] = []
         self._task: asyncio.Task | None = None
 
-    async def connect(self, instructions, tools) -> None:
-        return None
+    async def connect(self, instructions, tools, voice=None, language=None) -> None:
+        self.voice, self.language = voice, language
 
     async def _respond(self) -> None:
         for ev in self.script:

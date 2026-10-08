@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     openai_realtime_url: str = "wss://api.openai.com/v1/realtime"
     openai_realtime_model: str = "gpt-realtime"
 
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:4310"]
     ws_ticket_ttl_seconds: int = 30
     max_sessions_per_org: int = 50
     rate_limit_sessions_per_min: int = 20  # creaciones de sesión por usuario
@@ -44,6 +44,27 @@ class Settings(BaseSettings):
     barge_in_confirm_ms: int = 400
     sample_rate: int = 24000
 
+    # Voces e idiomas ofrecidos en la UI. Los valores se validan en el servidor: el cliente no puede inyectar otros.
+    allowed_voices: list[str] = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+    allowed_languages: list[str] = ["es", "en", "pt", "fr", "de", "it"]
+
+    # Grabación (opt-in): ninguna sesión se graba salvo que haya almacenamiento configurado, la organización lo
+    # tenga habilitado (organizations.recording_enabled) y la persona haya dado su consentimiento explícito.
+    recording_storage: Literal["none", "local", "s3"] = "none"
+    recording_local_dir: str = "/data/recordings"
+    recording_s3_bucket: str = ""
+    recording_s3_region: str = ""
+    recording_s3_endpoint_url: str = ""  # MinIO, R2, etc.
+    recording_s3_sse: Literal["AES256", "aws:kms"] = "AES256"
+    recording_s3_kms_key_id: str = ""
+    recording_url_ttl_seconds: int = 300
+
+    # Retención: purga periódica según organizations.retention_days.
+    retention_job_enabled: bool = True
+    retention_interval_seconds: int = 3600
+    retention_batch_size: int = 500
+    memory_retention_days: int = 30  # solo modo memoria (en Postgres manda organizations.retention_days)
+
     @model_validator(mode="after")
     def _production_guards(self) -> "Settings":
         if self.environment == "production":
@@ -56,6 +77,8 @@ class Settings(BaseSettings):
                 problems.append("STATE_BACKEND debe ser 'redis'")
             if "*" in self.cors_origins:
                 problems.append("CORS_ORIGINS no puede ser '*'")
+            if self.recording_storage == "local":
+                problems.append("RECORDING_STORAGE=local no es válido en producción (usa 's3')")
             if problems:
                 raise ValueError("Configuración insegura para producción: " + "; ".join(problems))
         return self

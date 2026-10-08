@@ -16,6 +16,9 @@ class StateStore(Protocol):
     async def acquire_session(self, org_id: str, session_id: str, limit: int, stale_after_s: int = 7200) -> bool: ...
     async def release_session(self, org_id: str, session_id: str) -> None: ...
     async def active_sessions(self, org_id: str) -> int: ...
+    async def put_session_options(self, key: str, options: dict, ttl: int) -> None: ...
+    async def take_session_options(self, key: str) -> dict: ...
+    async def acquire_lock(self, name: str, ttl_s: int) -> bool: ...
 
 
 class InMemoryStateStore:
@@ -23,6 +26,22 @@ class InMemoryStateStore:
         self._tickets: dict[str, tuple[Principal, float]] = {}
         self._hits: dict[str, tuple[int, float]] = {}
         self._sessions: dict[str, dict[str, float]] = {}
+        self._options: dict[str, tuple[dict, float]] = {}
+        self._locks: dict[str, float] = {}
+
+    async def put_session_options(self, key, options, ttl):
+        self._options[key] = (options, time.time() + ttl)
+
+    async def take_session_options(self, key):
+        entry = self._options.pop(key, None)
+        return entry[0] if entry and entry[1] >= time.time() else {}
+
+    async def acquire_lock(self, name, ttl_s):
+        now = time.time()
+        if self._locks.get(name, 0) > now:
+            return False
+        self._locks[name] = now + ttl_s
+        return True
 
     async def put_ticket(self, ticket, p, ttl, agent_id=None):
         self._tickets[ticket] = (p, agent_id, time.time() + ttl)
@@ -102,3 +121,14 @@ class RedisStateStore:
 
     async def active_sessions(self, org_id):
         return int(await self.r.zcard(f"sessions:{org_id}"))
+
+    async def put_session_options(self, key, options, ttl):
+        await self.r.set(f"opts:{key}", json.dumps(options), ex=ttl)
+
+    async def take_session_options(self, key):
+        raw = await self.r.getdel(f"opts:{key}")
+        return json.loads(raw) if raw else {}
+
+    async def acquire_lock(self, name, ttl_s):
+        # SET NX EX: solo una réplica obtiene el candado por intervalo (jobs periódicos como la retención).
+        return bool(await self.r.set(f"lock:{name}", "1", nx=True, ex=ttl_s))

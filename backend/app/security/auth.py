@@ -11,7 +11,8 @@ from app.core.config import get_settings
 bearer = HTTPBearer(auto_error=False)
 
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "admin": {"agents:write", "agents:read", "conversations:read", "metrics:read", "audit:read", "session:create"},
+    "admin": {"agents:write", "agents:read", "conversations:read", "metrics:read", "audit:read", "session:create",
+              "recordings:read"},
     "operator": {"agents:read", "conversations:read", "metrics:read", "session:create"},
     "customer": {"session:create"},
 }
