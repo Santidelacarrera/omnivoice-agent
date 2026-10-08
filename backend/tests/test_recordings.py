@@ -294,7 +294,13 @@ def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp
                 if fr:
                     out.append(fr)
             return out
-        assert False, ("LOGS", capfd.readouterr().out[-2500:].replace(chr(10), " | "), acts)
+        import faulthandler
+        import sys as _s
+        capfd.readouterr()
+        faulthandler.dump_traceback(file=_s.stderr, all_threads=True)
+        err = capfd.readouterr().err
+        keep = [l.strip() for l in err.splitlines() if "site-packages" not in l or "starlette" in l]
+        assert False, ("STACKS", " | ".join(keep)[-3000:], acts)
     assert r.status_code == 200, (r.text, acts)
     assert r.content[:4] == b"RIFF" and r.headers["content-type"] == "audio/wav"
     assert "recording.accessed" in [a["action"] for a in app.state.db.audits]
