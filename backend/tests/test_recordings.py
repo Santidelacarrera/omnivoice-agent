@@ -266,7 +266,9 @@ def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp
     cid = c.get("/api/v1/conversations", headers=auth("operator")).json()["items"][0]["id"]
     assert c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("operator")).status_code == 403
     r = c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("admin"))
-    assert r.status_code == 200 and r.content[:4] == b"RIFF" and r.headers["content-type"] == "audio/wav"
+    acts = [a["action"] for a in app.state.db.audits]
+    assert r.status_code == 200, (r.text, acts, app.state.db.recordings)
+    assert r.content[:4] == b"RIFF" and r.headers["content-type"] == "audio/wav"
     assert "recording.accessed" in [a["action"] for a in app.state.db.audits]
 
 
