@@ -21,6 +21,7 @@ jobs:
           pytest -q --tb=short -rfE 2>&1 | tee /tmp/pytest.out || rc=$?
           # Los fallos se publican como anotaciones para verlos sin descargar logs.
           grep -E '^(FAILED|ERROR)|^E ' /tmp/pytest.out | head -25 | while IFS= read -r l; do echo "::error::${l:0:400}"; done
+          if [ "${rc:-0}" != 0 ]; then tail -n 15 /tmp/pytest.out | while IFS= read -r l; do echo "::error::tail ${l:0:300}"; done; fi
           exit ${rc:-0}
       - name: Benchmark de humo del orquestador
         run: python -m bench.orchestrator_bench --sessions 50 --rounds 3
