@@ -65,6 +65,19 @@ class Settings(BaseSettings):
     retention_batch_size: int = 500
     memory_retention_days: int = 30  # solo modo memoria (en Postgres manda organizations.retention_days)
 
+    # Telefonía (PSTN/SIP) mediante Twilio Programmable Voice + Media Streams. Vacío = telefonía desactivada.
+    telephony_provider: Literal["none", "twilio"] = "none"
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""  # número E.164 desde el que se emiten llamadas
+    telephony_public_url: str = ""  # URL pública https del backend (la usa Twilio para el webhook y el stream)
+    telephony_org_id: str = "00000000-0000-0000-0000-000000000001"  # organización que atiende las llamadas entrantes
+    telephony_agent_id: str = ""  # agente que contesta (vacío = agente por defecto)
+    telephony_language: str = "es"
+    human_transfer_number: str = ""  # número E.164 del operador/cola humana
+    transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
+    twilio_validate_signature: bool = True
+
     @model_validator(mode="after")
     def _production_guards(self) -> "Settings":
         if self.environment == "production":
@@ -79,6 +92,11 @@ class Settings(BaseSettings):
                 problems.append("CORS_ORIGINS no puede ser '*'")
             if self.recording_storage == "local":
                 problems.append("RECORDING_STORAGE=local no es válido en producción (usa 's3')")
+            if self.telephony_provider == "twilio":
+                if not (self.twilio_account_sid and self.twilio_auth_token and self.telephony_public_url.startswith("https://")):
+                    problems.append("TELEPHONY_PROVIDER=twilio exige TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN y TELEPHONY_PUBLIC_URL https")
+                if not self.twilio_validate_signature:
+                    problems.append("TWILIO_VALIDATE_SIGNATURE no puede desactivarse en producción")
             if problems:
                 raise ValueError("Configuración insegura para producción: " + "; ".join(problems))
         return self

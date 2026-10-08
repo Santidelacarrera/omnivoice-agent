@@ -49,6 +49,7 @@ class VoiceSession:
         options: SessionOptions | None = None,
         recording_storage: Any = None,
         recording_allowed: bool = False,
+        transfer_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.correlation_id = uuid.uuid4().hex  # une logs, eventos y auditoría de esta sesión
@@ -63,6 +64,8 @@ class VoiceSession:
         self.on_close = on_close
         self.options = options or SessionOptions()
         self.recording_storage = recording_storage
+        # Derivación efectiva a un humano (p. ej. telefonía). Sin handler, `transfer_to_human` solo deja constancia.
+        self.transfer_handler = transfer_handler
         # Se graba solo con las tres condiciones: almacenamiento configurado, política de la organización y consentimiento.
         self.recorder: StereoRecorder | None = (
             StereoRecorder(settings.sample_rate, settings.max_session_seconds)
@@ -315,6 +318,17 @@ class VoiceSession:
             "tool": ev["name"], "call_id": ev["call_id"], "args": {"keys": arg_keys},
             "result": {"ok": result.get("ok"), "error": result.get("error")},
             "ok": result.get("ok"), "duration_ms": duration_ms})
+        if ev["name"] == "transfer_to_human" and result.get("ok") and self.transfer_handler:
+            reason = str((result.get("data") or {}).get("reason", ""))
+            try:
+                outcome = await self.transfer_handler(reason)
+            except Exception:  # noqa: BLE001
+                log.exception("transfer_failed", session=self.id)
+                outcome = {"status": "failed"}
+            await self._audit("transfer.requested", {"status": outcome.get("status")})
+            ok = outcome.get("status") == "initiated"
+            result = {"ok": ok, "data": {"transfer": outcome.get("status")}} if ok else {
+                "ok": False, "error": "transferencia_no_disponible"}
         await self.send({"type": "tool.end", "name": ev["name"], "ok": result.get("ok", False)})
         if epoch != self._epoch:
             return  # el usuario interrumpió; no se narra un resultado obsoleto

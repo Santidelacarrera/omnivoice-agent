@@ -3,7 +3,7 @@ import json
 import struct
 import uuid
 from contextlib import asynccontextmanager
-from typing import Callable
+from typing import Any, Callable
 
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -63,6 +63,7 @@ def create_app(
     provider_factory: Callable[[], RealtimeProvider] | None = None,
     recording_storage: RecordingStorage | None = None,
     retention_backend: RetentionBackend | None = None,
+    twilio: Any = None,
 ) -> FastAPI:
     s = settings or get_settings()
     live: dict[str, VoiceSession] = {}
@@ -369,6 +370,10 @@ def create_app(
                 await session.close()  # on_close libera el cupo
             else:
                 await app.state.store.release_session(principal.org_id, session_key)
+
+    from app.telephony.routes import register_telephony
+
+    register_telephony(app, s, live, make_provider, registry, authed, storage, twilio)
 
     return app
 
