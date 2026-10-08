@@ -367,7 +367,9 @@ def create_app(
             pass
         finally:
             if session is not None:
-                await session.close()  # on_close libera el cupo
+                # shield: si el servidor cancela este handler (cierre, desconexión abrupta) el cierre de la sesión
+                # —que guarda la grabación y libera el cupo— debe terminar igualmente.
+                await asyncio.shield(session.close())  # on_close libera el cupo
             else:
                 await app.state.store.release_session(principal.org_id, session_key)
 

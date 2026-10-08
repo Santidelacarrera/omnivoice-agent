@@ -266,7 +266,7 @@ def test_org_policy_blocks_recording(tmp_path):
     assert r["recording"] is False
 
 
-def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp_path, capfd):
+def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp_path):
     app, c = api_client(tmp_path)
     h = auth()
     sess = c.post("/api/v1/sessions", json={"recording_consent": True, "voice": "alloy", "language": "es"}, headers=h).json()
@@ -283,17 +283,7 @@ def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp
     assert c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("operator")).status_code == 403
     r = c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("admin"))
     acts = [a["action"] for a in app.state.db.audits]
-    if r.status_code != 200:
-        import asyncio as _a
-
-        async def dump():
-            out = []
-            for t in _a.all_tasks():
-                fr = [f"{f.f_code.co_filename.split('/')[-1]}:{f.f_lineno}" for f in t.get_stack(limit=4)]
-                out.append(f"{t.get_coro().__qualname__}@{fr}")
-            return out
-        assert False, ("TASKS", c.portal.call(dump), acts)
-    assert r.status_code == 200, (r.text, acts, capfd.readouterr().out[-1800:].replace(chr(10), ' | '))
+    assert r.status_code == 200, (r.text, acts)
     assert r.content[:4] == b"RIFF" and r.headers["content-type"] == "audio/wav"
     assert "recording.accessed" in [a["action"] for a in app.state.db.audits]
 

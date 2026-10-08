@@ -175,7 +175,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
             pass
         finally:
             if session is not None:
-                await session.close()
+                await asyncio.shield(session.close())
             elif principal is not None:
                 await app.state.store.release_session(principal.org_id, session_key)
 
