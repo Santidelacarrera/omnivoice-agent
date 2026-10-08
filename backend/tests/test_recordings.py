@@ -226,6 +226,16 @@ def auth(role="customer", org="o1", user="u1"):
     return {"Authorization": f"Bearer {issue_token(user, org, role)}"}
 
 
+def stream_then_end(ws, frames=6):
+    """Envía voz, espera la respuesta del agente (como un cliente real) y termina la llamada."""
+    for i in range(frames):
+        ws.send_bytes(struct.pack(">I", i) + LOUD)
+    for _ in range(40):
+        if ws.receive().get("bytes"):
+            break
+    ws.send_text('{"type":"end"}')
+
+
 def wait_closed(app, timeout=5.0):
     """El cierre de la sesión corre en el servidor tras salir del `with` del cliente: se espera a su auditoría."""
     import time
@@ -275,30 +285,12 @@ def test_full_flow_with_consent_stores_recording_and_only_admin_can_download(tmp
     with c.websocket_connect(conn["ws_path"]) as ws:
         ready = ws.receive_json()
         assert ready["type"] == "session.ready" and ready["recording"] is True
-        for i in range(6):
-            ws.send_bytes(struct.pack(">I", i) + LOUD)
-        ws.send_text('{"type":"end"}')
+        stream_then_end(ws)
     wait_closed(app)
     cid = c.get("/api/v1/conversations", headers=auth("operator")).json()["items"][0]["id"]
     assert c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("operator")).status_code == 403
     r = c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("admin"))
     acts = [a["action"] for a in app.state.db.audits]
-    if r.status_code != 200:
-        import asyncio as _a
-
-        async def dump():
-            out = []
-            for t in _a.all_tasks():
-                co, chain = t.get_coro(), []
-                while co is not None:
-                    fr = getattr(co, "cr_frame", None) or getattr(co, "ag_frame", None) or getattr(co, "gi_frame", None)
-                    if fr is not None:
-                        chain.append(f"{fr.f_code.co_name}:{fr.f_code.co_filename.split('/')[-1]}:{fr.f_lineno}")
-                    co = getattr(co, "cr_await", None) or getattr(co, "ag_await", None) or getattr(co, "gi_yieldfrom", None)
-                if any(("main.py" in c or "session.py" in c or "recordings.py" in c) for c in chain):
-                    out.append(chain[-6:])
-            return out
-        assert False, ("CHAINS", c.portal.call(dump), acts)
     assert r.status_code == 200, (r.text, acts)
     assert r.content[:4] == b"RIFF" and r.headers["content-type"] == "audio/wav"
     assert "recording.accessed" in [a["action"] for a in app.state.db.audits]
@@ -311,8 +303,7 @@ def test_other_org_cannot_download_recording(tmp_path):
     conn = c.post(f"/api/v1/sessions/{sess['session_id']}/connect", headers=h).json()
     with c.websocket_connect(conn["ws_path"]) as ws:
         ws.receive_json()
-        ws.send_bytes(struct.pack(">I", 0) + LOUD)
-        ws.send_text('{"type":"end"}')
+        stream_then_end(ws, 1)
     wait_closed(app)
     cid = c.get("/api/v1/conversations", headers=auth("operator", org="o1")).json()["items"][0]["id"]
     assert c.get(f"/api/v1/conversations/{cid}/recording", headers=auth("admin", org="o1")).status_code == 200  # existe
