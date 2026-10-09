@@ -49,4 +49,4 @@ que dos réplicas lo ejecuten a la vez. La auditoría es solo-anexar y no se pur
 
 Informe publicable: `python -m bench.loadtest --url ... --clients 50 --duration 30 --mode real --label "..." --out r.json`
 y `python -m bench.report r.json > docs/LATENCY.md`. El loadtest usa habla sintética: ejecútalo con `VAD_BACKEND=energy`.
-Contratos con OpenAI: `OPENAI_API_KEY=... pytest -m contract tests/contract`.
+Contratos con los proveedores: `OPENAI_API_KEY=... GEMINI_API_KEY=... pytest -m contract tests/contract` (cada prueba se omite si falta su clave).

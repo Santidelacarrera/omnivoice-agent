@@ -191,7 +191,7 @@ def create_app(
             raise HTTPException(429, "Capacidad de la organización agotada")
         voice = body.voice if body else None
         language = body.language if body else None
-        if voice and voice not in s.allowed_voices:
+        if voice and voice not in s.available_voices:
             raise HTTPException(422, f"Voz no disponible: {voice}")
         if language and language.split("-")[0] not in s.allowed_languages:
             raise HTTPException(422, f"Idioma no disponible: {language}")
@@ -223,7 +223,7 @@ def create_app(
     async def catalog(p: Principal = Depends(authed("session:create"))):
         policy = await app.state.db.org_policy(p.org_id)
         return {
-            "voices": s.allowed_voices,
+            "voices": s.available_voices,
             "languages": [{"code": c, "name": LANGUAGE_NAMES.get(c, c)} for c in s.allowed_languages],
             "recording": {"available": storage is not None and policy["recording_enabled"]},
         }
@@ -286,6 +286,10 @@ def create_app(
     def make_provider() -> RealtimeProvider:
         if provider_factory:
             return provider_factory()
+        if s.active_provider == "gemini" and s.gemini_api_key:
+            from app.realtime.gemini import GeminiLiveProvider
+
+            return GeminiLiveProvider(s)
         if s.openai_api_key:
             return OpenAIRealtimeProvider(s)
         # Modo simulado: responde una vez por sesión para poder ver la interfaz sin clave ni crédito.

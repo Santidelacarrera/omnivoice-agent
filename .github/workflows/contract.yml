@@ -17,3 +17,4 @@ jobs:
       - run: pytest -q -m contract tests/contract
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

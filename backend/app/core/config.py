@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_realtime_url: str = "wss://api.openai.com/v1/realtime"
     openai_realtime_model: str = "gpt-realtime"
+    # Proveedor de voz en la nube. "auto": Gemini si hay GEMINI_API_KEY, si no OpenAI si hay clave, si no simulado.
+    voice_provider: Literal["auto", "gemini", "openai"] = "auto"
+    gemini_api_key: str = ""
+    gemini_live_model: str = "gemini-3.8-live"
+    gemini_voices: list[str] = ["Kore", "Puck", "Charon", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"]
 
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:4310"]
     ws_ticket_ttl_seconds: int = 30
@@ -77,6 +82,16 @@ class Settings(BaseSettings):
     human_transfer_number: str = ""  # número E.164 del operador/cola humana
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
     twilio_validate_signature: bool = True
+
+    @property
+    def active_provider(self) -> str:
+        if self.voice_provider != "auto":
+            return self.voice_provider
+        return "gemini" if self.gemini_api_key else "openai" if self.openai_api_key else "simulated"
+
+    @property
+    def available_voices(self) -> list[str]:
+        return self.gemini_voices if self.active_provider == "gemini" else self.allowed_voices
 
     @model_validator(mode="after")
     def _production_guards(self) -> "Settings":

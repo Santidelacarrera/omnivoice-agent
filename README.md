@@ -73,7 +73,7 @@ cp .env.example .env          # Windows: copy .env.example .env
 docker compose up --build
 ```
 
-Sin `OPENAI_API_KEY` se usa un **proveedor simulado**, suficiente para ver la interfaz, las herramientas y las métricas.
+Para voz real basta una de dos claves: `GEMINI_API_KEY` (Google Gemini Live; hay clave gratuita en AI Studio) u `OPENAI_API_KEY`. Con ambas manda Gemini (`VOICE_PROVIDER=openai` fuerza OpenAI). Sin ninguna se usa un **proveedor simulado**, suficiente para ver la interfaz, las herramientas y las métricas.
 La clave real va **solo en `.env`** (ignorado por Git), nunca en `.env.example`.
 
 | Qué | Dónde |
@@ -194,7 +194,9 @@ Ver [`.env.example`](.env.example). Variables principales:
 | `ENVIRONMENT` | `development` | `production` activa las comprobaciones de arranque |
 | `PERSISTENCE_BACKEND` / `STATE_BACKEND` | `postgres` / `redis` | `memory` para desarrollo sin servicios |
 | `JWT_SECRET` | *(placeholder)* | ≥ 32 caracteres en producción |
-| `OPENAI_API_KEY` | vacío | vacío = proveedor simulado |
+| `GEMINI_API_KEY` | vacío | voz real con Google Gemini Live (`GEMINI_LIVE_MODEL`, por defecto `gemini-3.8-live`) |
+| `OPENAI_API_KEY` | vacío | voz real con OpenAI; sin ninguna clave = proveedor simulado |
+| `VOICE_PROVIDER` | `auto` | `auto` / `gemini` / `openai` |
 | `DATABASE_URL` | rol `omni_app` | debe ser un rol **sin** superusuario |
 | `MAX_SESSIONS_PER_ORG` | `50` | cupo por organización |
 | `RATE_LIMIT_SESSIONS_PER_MIN` / `RATE_LIMIT_API_PER_MIN` | `20` / `240` | ventana fija |
