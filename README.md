@@ -199,6 +199,38 @@ Ver [`.env.example`](.env.example). Variables principales:
 | `MAX_SESSIONS_PER_ORG` | `50` | cupo por organización |
 | `RATE_LIMIT_SESSIONS_PER_MIN` / `RATE_LIMIT_API_PER_MIN` | `20` / `240` | ventana fija |
 | `MAX_SESSION_SECONDS` | `1800` | duración máxima de una sesión |
+| `VAD_BACKEND` | `webrtc` | `webrtc` (modelo, con respaldo a `energy` si no carga) o `energy` |
+| `RETENTION_JOB_ENABLED` / `RETENTION_INTERVAL_SECONDS` | `true` / `3600` | purga por `organizations.retention_days` |
+| `RECORDING_STORAGE` | `none` | `none` \| `local` (solo desarrollo) \| `s3`; además exige política de la organización y consentimiento |
+| `RECORDING_S3_BUCKET`, `_REGION`, `_ENDPOINT_URL`, `_SSE`, `_KMS_KEY_ID` | vacío | S3 o compatible, cifrado en reposo |
+| `TELEPHONY_PROVIDER` | `none` | `twilio` activa PSTN/SIP (ver «Telefonía») |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` | vacío | credenciales y número saliente |
+| `TELEPHONY_PUBLIC_URL` | vacío | URL https pública del backend (webhook y stream) |
+| `HUMAN_TRANSFER_NUMBER` | vacío | número E.164 del operador al que se transfiere |
+
+## Telefonía (SIP/PSTN) y transferencia a un humano
+
+Pasarela basada en Twilio Programmable Voice (número PSTN o SIP trunk) con Media Streams:
+
+- **Entrante:** Twilio llama a `POST /telephony/voice` (firma `X-Twilio-Signature` validada) → TwiML `<Connect><Stream>` →
+  `WS /ws/telephony` con ticket de un solo uso. Audio μ-law 8 kHz ↔ PCM16 24 kHz (`app/telephony/codec.py`).
+- **Saliente:** `POST /api/v1/telephony/calls {"to": "+E164"}` (roles admin/operador).
+- **Transferencia:** la herramienta `transfer_to_human` redirige la llamada en curso con `<Dial>` al `HUMAN_TRANSFER_NUMBER`
+  tras `TRANSFER_ANNOUNCE_MS`, para que el agente termine de avisar. En el navegador (sin teléfono) sigue siendo solo un registro.
+- El número del llamante nunca se guarda en claro: se usa un hash corto en logs y auditoría.
+- No se graba audio telefónico (no hay aviso previo de grabación implementado); hacerlo requiere un aviso legal en la llamada.
+- Para exponer el backend en local: un túnel https (p. ej. ngrok) y `TELEPHONY_PUBLIC_URL` con esa URL.
+
+## VAD, retención y grabación
+
+- **VAD:** WebRTC VAD (modelo estadístico) en el servidor confirma el barge-in; el navegador solo pausa al instante y envía una pista.
+  Si era ruido, el servidor ordena reanudar (`audio.resume`).
+- **Retención:** un job periódico (con bloqueo en Redis entre réplicas) borra transcripciones, eventos, herramientas, conversaciones
+  y grabaciones anteriores a `retention_days` de cada organización. La auditoría no se purga. Migración: `migrations/004_retention_recording.sql`.
+- **Grabación:** opt-in triple (almacenamiento configurado + política de la organización + consentimiento explícito de la persona).
+  WAV estéreo (usuario/agente), S3 con SSE/KMS, descarga solo para administradores con URL prefirmada y auditoría; la persona puede
+  revocar en plena llamada y se descarta lo grabado.
+- **Voz e idioma:** selectores en la pantalla de conversación alimentados por `GET /api/v1/catalog`.
 
 ## Pruebas, CI y rendimiento
 
@@ -238,24 +270,21 @@ Conviene saber qué está verificado y qué no:
 
 - **Verificado:** pruebas del backend y compilación del frontend en CI; migraciones y aislamiento por RLS sobre
   PostgreSQL real en CI.
-- **No verificado aún:** los nombres de eventos del adaptador **OpenAI Realtime** frente a la versión vigente de la
-  API (no se probó contra el servicio real); los objetivos de latencia (p50 < 500 ms, barge-in p95 < 200 ms) son
-  **metas** a validar con `bench/loadtest.py`.
-- **No implementado:** purga automática por `retention_days` (ver runbook), SSO y gestión de usuarios (el JWT lo emite
-  tu proveedor de identidad), telefonía, grabación de audio, transferencia efectiva a un operador humano, selector de
-  voz e idioma en la UI.
-- El VAD es por energía: en entornos ruidosos conviene uno basado en modelo (Silero, WebRTC VAD).
+- **No verificado:** contra el servicio real de OpenAI (las pruebas de contrato de `backend/tests/contract` existen y las
+  ejecuta el workflow `contract` con tu clave; hasta que corran, el adaptador es una suposición); la telefonía contra un
+  operador real (requiere tu cuenta Twilio y un túnel/URL pública); S3 real; el VAD con audio humano real en ruido.
+- **Latencia:** no hay cifras publicadas. Genera las tuyas con `bench.loadtest --out` + `bench.report`; el informe indica si
+  el proveedor era real o simulado. Los objetivos (p50 < 500 ms, barge-in p95 < 200 ms) siguen siendo **metas**.
+- **No implementado:** SSO y gestión de usuarios (el JWT lo emite tu proveedor de identidad), grabación de llamadas telefónicas
+  (requiere aviso legal previo) y SIP directo sin intermediario (se usa Twilio como pasarela).
 - El rate limiter es de ventana fija (ráfagas de hasta 2× en el cambio de ventana).
 
 ## Hoja de ruta
 
-- [ ] Contrastar el adaptador de OpenAI Realtime con la API vigente y añadir pruebas de contrato
-- [ ] Medir y publicar p50/p95 extremo a extremo con carga real
-- [ ] Job de purga por `retention_days`
-- [ ] VAD basado en modelo
-- [ ] Transferencia real a operador humano y telefonía (SIP)
-- [ ] Grabación opcional con consentimiento y almacenamiento de objetos
-- [ ] Selector de voz e idioma; migración a Next 16 y Tailwind 4 (PR en revisión)
+- [x] VAD basado en modelo · [x] Job de purga · [x] Grabación con consentimiento y S3 · [x] Selector de voz e idioma
+- [x] Telefonía por Twilio y transferencia a humano (pendiente de prueba con un operador real)
+- [ ] Ejecutar las pruebas de contrato con clave real y publicar `docs/LATENCY.md` con medición real
+- [ ] Aviso legal y grabación de llamadas telefónicas · SIP directo (sin intermediario)
 
 ---
 

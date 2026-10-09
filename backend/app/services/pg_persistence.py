@@ -166,3 +166,37 @@ class PostgresPersistence:
                 text("SELECT COALESCE(sum(audio_seconds),0) s, COALESCE(sum(estimated_cost_usd),0) c "
                      "FROM usage_records WHERE org_id = :o"), {"o": org_id})).first()
         return {"audio_seconds": float(r.s), "estimated_cost_usd": float(r.c)}
+
+    async def org_policy(self, org_id):
+        try:
+            async with org_transaction(org_id) as c:
+                r = (await c.execute(text("SELECT recording_enabled FROM organizations WHERE id = :o"), {"o": org_id})).first()
+            return {"recording_enabled": bool(r[0]) if r else False}
+        except Exception:  # noqa: BLE001 - ante la duda, sin grabación
+            ERRORS.labels("persistence").inc()
+            log.exception("persistence_failed", op="org_policy")
+            return {"recording_enabled": False}
+
+    @_safe
+    async def set_conversation_options(self, org_id, conversation_id, *, recording_consent, voice, language):
+        async with org_transaction(org_id) as c:
+            await c.execute(
+                text("UPDATE conversations SET recording_consent = :rc, voice = :v, language = :l, "
+                     "consent_at = CASE WHEN :rc THEN now() ELSE NULL END WHERE id = :c AND org_id = :o"),
+                {"rc": recording_consent, "v": voice, "l": language, "c": conversation_id, "o": org_id})
+
+    @_safe
+    async def add_recording(self, org_id, conversation_id, key, size, duration_s):
+        async with org_transaction(org_id) as c:
+            await c.execute(
+                text("INSERT INTO recordings (org_id, conversation_id, storage_key, bytes, duration_s) "
+                     "VALUES (:o, :c, :k, :b, :d)"),
+                {"o": org_id, "c": conversation_id, "k": key, "b": size, "d": round(duration_s, 2)})
+
+    async def get_recording(self, org_id, conversation_id):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(
+                text("SELECT storage_key, bytes, duration_s, created_at FROM recordings "
+                     "WHERE conversation_id = :c AND org_id = :o ORDER BY created_at DESC LIMIT 1"),
+                {"c": conversation_id, "o": org_id})).mappings().first()
+        return {**r, "duration_s": float(r["duration_s"]), "created_at": r["created_at"].timestamp()} if r else None

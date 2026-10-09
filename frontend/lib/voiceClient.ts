@@ -7,6 +7,14 @@ export interface VoiceEvents {
   onTool: (name: string, phase: "start" | "end", ok?: boolean) => void;
   onLevel: (rms: number) => void;
   onError?: (message: string) => void;
+  onRecording?: (active: boolean) => void;
+}
+
+export interface SessionChoices {
+  agentId?: string;
+  voice?: string;
+  language?: string;
+  recordingConsent?: boolean;
 }
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -23,7 +31,7 @@ export class VoiceClient {
   private agentSpeaking = false;
   muted = false;
 
-  constructor(private token: string, private ev: VoiceEvents, private agentId?: string) {}
+  constructor(private token: string, private ev: VoiceEvents, private choices: SessionChoices = {}) {}
 
   async start() {
     this.ev.onState("connecting");
@@ -31,7 +39,12 @@ export class VoiceClient {
     // 1) crear sesión  2) pedir conexión: el navegador solo recibe un ticket WS de 30 s y un solo uso;
     // ni el JWT viaja en la URL ni la API key del proveedor sale del backend.
     const created = await fetch(`${API}/api/v1/sessions`, {
-      method: "POST", headers: auth, body: JSON.stringify(this.agentId ? { agent_id: this.agentId } : {}),
+      method: "POST", headers: auth, body: JSON.stringify({
+        ...(this.choices.agentId ? { agent_id: this.choices.agentId } : {}),
+        ...(this.choices.voice ? { voice: this.choices.voice } : {}),
+        ...(this.choices.language ? { language: this.choices.language } : {}),
+        recording_consent: !!this.choices.recordingConsent,
+      }),
     });
     if (!created.ok) throw new Error(`No se pudo crear la sesión (${created.status})`);
     const { session_id } = await created.json();
@@ -83,11 +96,11 @@ export class VoiceClient {
   }
 
   private localBargeIn() {
+    // Pausa inmediata (el usuario oye silencio en ms) y pista al servidor. El servidor confirma con su VAD de
+    // modelo ("audio.clear") o lo descarta como ruido ("audio.resume"); así el ruido de fondo no corta al agente.
     this.bargeAt = performance.now();
-    this.agentSpeaking = false;
-    this.playback?.port.postMessage({ type: "clear" });
+    this.playback?.port.postMessage({ type: "pause" });
     this.ws?.send(JSON.stringify({ type: "barge_in" }));
-    this.ev.onState("interrupted");
   }
 
   private onMessage(m: MessageEvent) {
@@ -99,8 +112,14 @@ export class VoiceClient {
     }
     const msg = JSON.parse(m.data);
     switch (msg.type) {
-      case "session.ready": this.ev.onState("listening"); break;
-      case "audio.clear": this.agentSpeaking = false; this.playback?.port.postMessage({ type: "clear" }); break;
+      case "session.ready": this.ev.onRecording?.(!!msg.recording); this.ev.onState("listening"); break;
+      case "recording": this.ev.onRecording?.(!!msg.active); break;
+      case "audio.clear":
+        this.agentSpeaking = false;
+        this.playback?.port.postMessage({ type: "clear" });
+        this.ev.onState("interrupted");
+        break;
+      case "audio.resume": this.bargeAt = 0; this.playback?.port.postMessage({ type: "resume" }); break;
       case "transcript_user": this.ev.onTranscript("user", msg.text); break;
       case "transcript_agent": this.ev.onTranscript("agent", msg.text); break;
       case "metrics": this.ev.onMetrics({ firstAudioMs: msg.first_audio_ms }); break;
@@ -113,6 +132,12 @@ export class VoiceClient {
         void this.shutdown().then(() => this.ev.onState("error"));
         break;
     }
+  }
+
+  /** Retira el consentimiento de grabación durante la llamada: el servidor descarta lo grabado. */
+  revokeRecording() {
+    try { this.ws?.send(JSON.stringify({ type: "recording_revoke" })); } catch { /* ya cerrado */ }
+    this.ev.onRecording?.(false);
   }
 
   private async shutdown() {

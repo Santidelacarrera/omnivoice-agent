@@ -88,7 +88,7 @@ async def test_session_persists_transcripts_audit_tools_and_usage():
     async def send(m):
         sent.append(m)
 
-    s = VoiceSession(P, prov, build_registry(InMemoryRepository()), send, Settings(sample_rate=24000), persistence=db)
+    s = VoiceSession(P, prov, build_registry(InMemoryRepository()), send, Settings(sample_rate=24000, vad_backend="energy"), persistence=db)
     await s.start()
     for seq in range(50):  # 50 frames de 20 ms = 1 s de audio entrante
         await s.on_audio(LOUD, seq)

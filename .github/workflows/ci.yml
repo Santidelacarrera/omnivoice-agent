@@ -14,7 +14,15 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12", cache: pip, cache-dependency-path: backend/requirements.txt }
       - run: pip install -r requirements.txt
-      - run: pytest -q
+      - name: pytest
+        shell: bash
+        run: |
+          set -o pipefail
+          pytest -q --tb=short -rfE 2>&1 | tee /tmp/pytest.out || rc=$?
+          # Los fallos se publican como anotaciones para verlos sin descargar logs.
+          grep -E '^(FAILED|ERROR)|^E ' /tmp/pytest.out | head -25 | while IFS= read -r l; do echo "::error::${l:0:400}"; done || true
+          if [ "${rc:-0}" != 0 ]; then tail -n 15 /tmp/pytest.out | while IFS= read -r l; do echo "::error::tail ${l:0:300}"; done; fi
+          exit ${rc:-0}
       - name: Benchmark de humo del orquestador
         run: python -m bench.orchestrator_bench --sessions 50 --rounds 3
   migrations:
@@ -36,6 +44,12 @@ jobs:
           psql "postgresql://omni:omni@localhost:5432/omnivoice" -tAc "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname='omni_app'" | grep -qx f
           [ "$(psql "$PGURL" -tAc "SET app.org_id='00000000-0000-0000-0000-000000000001'; SELECT count(*) FROM inventory" | tail -1)" -gt 0 ]
           [ "$(psql "$PGURL" -tAc "SET app.org_id='00000000-0000-0000-0000-0000000000ff'; SELECT count(*) FROM inventory" | tail -1)" -eq 0 ]
+      - name: Grabaciones y retención (migración 004) con RLS forzada
+        run: |
+          export PGURL="postgresql://omni_app:omni_app@localhost:5432/omnivoice"
+          psql "postgresql://omni:omni@localhost:5432/omnivoice" -tAc "SELECT relforcerowsecurity FROM pg_class WHERE relname='recordings'" | grep -qx t
+          psql "$PGURL" -tAc "SET app.org_id='00000000-0000-0000-0000-0000000000ff'; SELECT count(*) FROM recordings" | tail -1 | grep -qx 0
+          psql "postgresql://omni:omni@localhost:5432/omnivoice" -tAc "SELECT count(*) FROM information_schema.columns WHERE table_name='organizations' AND column_name IN ('retention_days','recording_enabled')" | grep -qx 2
   frontend:
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: frontend } }

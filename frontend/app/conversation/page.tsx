@@ -1,6 +1,6 @@
 "use client";
-import { useRef, useState } from "react";
-import { getToken } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { api, Catalog, getToken } from "@/lib/api";
 import { AgentState, VoiceClient } from "@/lib/voiceClient";
 
 const LABEL: Record<AgentState, string> = {
@@ -17,15 +17,25 @@ export default function Conversation() {
   const [metrics, setMetrics] = useState<{ firstAudioMs?: number; bargeInMs?: number }>({});
   const [tool, setTool] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [voice, setVoice] = useState("");
+  const [language, setLanguage] = useState("");
+  const [recordConsent, setRecordConsent] = useState(false);
+  const [recording, setRecording] = useState(false);
   const client = useRef<VoiceClient | null>(null);
   const active = state !== "idle" && state !== "error";
+
+  useEffect(() => {
+    // Si el catálogo no responde, la pantalla sigue funcionando con los valores del agente.
+    api<Catalog>("/api/v1/catalog", "customer").then(setCatalog).catch(() => setCatalog(null));
+  }, []);
 
   async function toggle() {
     if (active) { await client.current?.stop(); return; }
     // Demo: token de desarrollo. En producción, el token proviene de tu proveedor de identidad.
     let token: string;
     try { token = await getToken("customer"); } catch { setState("error"); return; }
-    setLines([]); setMetrics({}); setError(null);
+    setLines([]); setMetrics({}); setError(null); setRecording(false);
     client.current = new VoiceClient(token, {
       onState: setState,
       onTranscript: (who, text) => setLines((l) => [...l, { who, text }]),
@@ -33,6 +43,11 @@ export default function Conversation() {
       onTool: (n, phase) => setTool(phase === "start" ? n : null),
       onLevel: setLevel,
       onError: setError,
+      onRecording: setRecording,
+    }, {
+      voice: voice || undefined,
+      language: language || undefined,
+      recordingConsent: recordConsent && !!catalog?.recording.available,
     });
     try { await client.current.start(); } catch { setState("error"); }
   }
@@ -48,6 +63,37 @@ export default function Conversation() {
         Acepto el uso del micrófono y el tratamiento de la conversación.
       </label>
 
+      {catalog && (
+        <div className="grid grid-cols-2 gap-4">
+          <label className="text-sm space-y-1">
+            <span className="block text-slate-500">Voz</span>
+            <select value={voice} onChange={(e) => setVoice(e.target.value)} disabled={active}
+              className="w-full rounded border p-2 disabled:opacity-40">
+              <option value="">Predeterminada del agente</option>
+              {catalog.voices.map((v) => <option key={v} value={v}>{v}</option>)}
+            </select>
+          </label>
+          <label className="text-sm space-y-1">
+            <span className="block text-slate-500">Idioma</span>
+            <select value={language} onChange={(e) => setLanguage(e.target.value)} disabled={active}
+              className="w-full rounded border p-2 disabled:opacity-40">
+              <option value="">Predeterminado del agente</option>
+              {catalog.languages.map((l) => <option key={l.code} value={l.code}>{l.name}</option>)}
+            </select>
+          </label>
+        </div>
+      )}
+      {catalog?.recording.available && (
+        <label className="flex items-start gap-2 text-sm">
+          <input type="checkbox" checked={recordConsent} disabled={active} className="mt-1"
+            onChange={(e) => setRecordConsent(e.target.checked)} />
+          <span>
+            Autorizo además que se <b>grabe el audio</b> de esta llamada para calidad y auditoría. Es opcional,
+            puedes retirarlo en cualquier momento y se borrará según la política de retención.
+          </span>
+        </label>
+      )}
+
       <div className="flex items-center gap-4">
         <button onClick={toggle} disabled={!consent && !active}
           className="rounded-full bg-indigo-600 px-6 py-3 text-white disabled:opacity-40" aria-live="polite">
@@ -59,6 +105,13 @@ export default function Conversation() {
         </button>
         <span className="text-sm font-medium" role="status">{LABEL[state]}{tool ? ` · ${tool}` : ""}</span>
       </div>
+
+      {recording && (
+        <p role="status" className="flex items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          <span className="h-2 w-2 animate-pulse rounded-full bg-red-600" aria-hidden /> Grabando esta llamada.
+          <button onClick={() => client.current?.revokeRecording()} className="ml-auto underline">Dejar de grabar y borrar</button>
+        </p>
+      )}
 
       {error && (
         <p role="alert" className="rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800">

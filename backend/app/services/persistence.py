@@ -30,6 +30,11 @@ class Persistence(Protocol):
     async def get_agent(self, org_id: str, agent_id: str) -> dict[str, Any] | None: ...
     async def create_agent(self, org_id: str, name: str, instructions: str, tools: list[str],
                            voice: str | None, language: str) -> dict[str, Any]: ...
+    async def org_policy(self, org_id: str) -> dict[str, Any]: ...
+    async def set_conversation_options(self, org_id: str, conversation_id: str, *, recording_consent: bool,
+                                       voice: str | None, language: str | None) -> None: ...
+    async def add_recording(self, org_id: str, conversation_id: str, key: str, size: int, duration_s: float) -> None: ...
+    async def get_recording(self, org_id: str, conversation_id: str) -> dict[str, Any] | None: ...
 
 
 class InMemoryPersistence:
@@ -40,6 +45,8 @@ class InMemoryPersistence:
         self.transcripts: dict[str, list[dict[str, Any]]] = {}
         self.events: dict[str, list[dict[str, Any]]] = {}
         self.tools: list[dict[str, Any]] = []
+        self.recordings: dict[str, list[dict[str, Any]]] = {}
+        self.recording_enabled_orgs: set[str] | None = None  # None = todas (desarrollo)
 
     async def audit(self, org_id, actor, action, detail):
         self.audits.append({"ts": time.time(), "org_id": org_id, "actor": actor, "action": action, "detail": detail})
@@ -95,3 +102,24 @@ class InMemoryPersistence:
         self.agents[aid] = {"id": aid, "org_id": org_id, "name": name, "instructions": instructions,
                             "tools": tools, "voice": voice, "language": language}
         return self.agents[aid]
+
+    async def org_policy(self, org_id):
+        enabled = self.recording_enabled_orgs is None or org_id in self.recording_enabled_orgs
+        return {"recording_enabled": enabled}
+
+    async def set_conversation_options(self, org_id, conversation_id, *, recording_consent, voice, language):
+        c = self.convs.get(conversation_id)
+        if c and c["org_id"] == org_id:
+            c.update(recording_consent=recording_consent, voice=voice, language=language,
+                     consent_at=time.time() if recording_consent else None)
+
+    async def add_recording(self, org_id, conversation_id, key, size, duration_s):
+        if self.convs.get(conversation_id, {}).get("org_id") == org_id:
+            self.recordings.setdefault(conversation_id, []).append(
+                {"storage_key": key, "bytes": size, "duration_s": duration_s, "created_at": time.time()})
+
+    async def get_recording(self, org_id, conversation_id):
+        if self.convs.get(conversation_id, {}).get("org_id") != org_id:
+            return None
+        recs = self.recordings.get(conversation_id)
+        return recs[-1] if recs else None

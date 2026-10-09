@@ -4,6 +4,8 @@ Cada cliente virtual: crea sesión -> connect -> abre WS -> envía habla sintét
 mide tiempo hasta el primer frame de audio de respuesta -> interrumpe y mide hasta 'audio.clear'.
 Imprime p50/p95/p99 y cuántas sesiones fueron rechazadas (429) para estimar capacidad concurrente.
 
+La voz sintética es una onda cuadrada: un VAD de modelo (webrtc) no la toma por voz humana, así que
+mide con VAD_BACKEND=energy en el servidor; el VAD de modelo se evalúa con audio real.
 Con OPENAI_API_KEY vacío el backend usa el proveedor simulado: sirve para medir tu stack, no al proveedor.
 Uso:  python -m bench.loadtest --url http://localhost:8000 --clients 50 --duration 20
 Requiere el backend con ENVIRONMENT=development (usa /auth/dev-token).
@@ -64,6 +66,9 @@ async def client(i: int, base: str, duration: float, first_audio: list[float], b
                             got = True
                             t_b = time.perf_counter()
                             await ws.send(json.dumps({"type": "barge_in"}))
+                            # El servidor confirma la interrupción con su propio VAD: hay que seguir "hablando".
+                            for _ in range(10):
+                                await ws.send(struct.pack(">I", seq) + SPEECH); seq += 1
                         elif isinstance(m, str) and json.loads(m).get("type") == "audio.clear":
                             barge.append(time.perf_counter() - t_b)
                             break
@@ -74,16 +79,23 @@ async def client(i: int, base: str, duration: float, first_audio: list[float], b
         stats["errors"] += 1
 
 
-async def main(base: str, clients: int, duration: float) -> None:
+async def main(base: str, clients: int, duration: float, out: str | None = None, mode: str = "unspecified",
+               label: str = "") -> None:
     first_audio: list[float] = []
     barge: list[float] = []
     stats = {"connected": 0, "rejected": 0, "timeouts": 0, "errors": 0}
     await asyncio.gather(*(client(i, base, duration, first_audio, barge, stats) for i in range(clients)))
-    print(json.dumps({
+    result = {
+        "meta": {"timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "url": base, "duration_s": duration,
+                 "provider_mode": mode, "label": label},
         "clients": clients, **stats,
         "first_audio_ms": {"count": len(first_audio), "p50": pct(first_audio, .5), "p95": pct(first_audio, .95), "p99": pct(first_audio, .99)},
         "barge_in_roundtrip_ms": {"count": len(barge), "p50": pct(barge, .5), "p95": pct(barge, .95), "p99": pct(barge, .99)},
-    }, indent=2))
+    }
+    print(json.dumps(result, indent=2))
+    if out:
+        with open(out, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2)
 
 
 if __name__ == "__main__":
@@ -91,5 +103,9 @@ if __name__ == "__main__":
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--clients", type=int, default=25)
     ap.add_argument("--duration", type=float, default=15)
+    ap.add_argument("--out", help="guarda el resultado en JSON (entrada de bench.report)")
+    ap.add_argument("--mode", choices=["real", "simulated", "unspecified"], default="unspecified",
+                    help="real = OPENAI_API_KEY con crédito; simulated = proveedor falso (mide solo tu stack)")
+    ap.add_argument("--label", default="", help="p. ej. 'VM 2 vCPU, VAD_BACKEND=energy'")
     a = ap.parse_args()
-    asyncio.run(main(a.url, a.clients, a.duration))
+    asyncio.run(main(a.url, a.clients, a.duration, a.out, a.mode, a.label))

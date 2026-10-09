@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     openai_realtime_url: str = "wss://api.openai.com/v1/realtime"
     openai_realtime_model: str = "gpt-realtime"
 
-    cors_origins: list[str] = ["http://localhost:3000"]
+    cors_origins: list[str] = ["http://localhost:3000", "http://localhost:4310"]
     ws_ticket_ttl_seconds: int = 30
     max_sessions_per_org: int = 50
     rate_limit_sessions_per_min: int = 20  # creaciones de sesión por usuario
@@ -34,9 +34,49 @@ class Settings(BaseSettings):
     max_ws_frame_bytes: int = 16384  # un frame PCM de 20 ms ocupa ~960 B; este tope frena abuso
     max_session_seconds: int = 1800
     tool_timeout_seconds: float = 8.0
+    # VAD del servidor: "webrtc" (modelo, por defecto) o "energy". Si el módulo nativo falta, cae a energía.
+    vad_backend: Literal["webrtc", "energy"] = "webrtc"
+    vad_aggressiveness: int = 2  # 0 (permisivo) .. 3 (muy estricto con el ruido)
     vad_energy_threshold: float = 0.015
     vad_min_speech_ms: int = 120
+    vad_hangover_ms: int = 600
+    # El navegador solo pausa el audio al detectar voz; si el servidor no la confirma en este plazo, se reanuda.
+    barge_in_confirm_ms: int = 400
     sample_rate: int = 24000
+
+    # Voces e idiomas ofrecidos en la UI. Los valores se validan en el servidor: el cliente no puede inyectar otros.
+    allowed_voices: list[str] = ["alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse", "marin", "cedar"]
+    allowed_languages: list[str] = ["es", "en", "pt", "fr", "de", "it"]
+
+    # Grabación (opt-in): ninguna sesión se graba salvo que haya almacenamiento configurado, la organización lo
+    # tenga habilitado (organizations.recording_enabled) y la persona haya dado su consentimiento explícito.
+    recording_storage: Literal["none", "local", "s3"] = "none"
+    recording_local_dir: str = "/data/recordings"
+    recording_s3_bucket: str = ""
+    recording_s3_region: str = ""
+    recording_s3_endpoint_url: str = ""  # MinIO, R2, etc.
+    recording_s3_sse: Literal["AES256", "aws:kms"] = "AES256"
+    recording_s3_kms_key_id: str = ""
+    recording_url_ttl_seconds: int = 300
+
+    # Retención: purga periódica según organizations.retention_days.
+    retention_job_enabled: bool = True
+    retention_interval_seconds: int = 3600
+    retention_batch_size: int = 500
+    memory_retention_days: int = 30  # solo modo memoria (en Postgres manda organizations.retention_days)
+
+    # Telefonía (PSTN/SIP) mediante Twilio Programmable Voice + Media Streams. Vacío = telefonía desactivada.
+    telephony_provider: Literal["none", "twilio"] = "none"
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_from_number: str = ""  # número E.164 desde el que se emiten llamadas
+    telephony_public_url: str = ""  # URL pública https del backend (la usa Twilio para el webhook y el stream)
+    telephony_org_id: str = "00000000-0000-0000-0000-000000000001"  # organización que atiende las llamadas entrantes
+    telephony_agent_id: str = ""  # agente que contesta (vacío = agente por defecto)
+    telephony_language: str = "es"
+    human_transfer_number: str = ""  # número E.164 del operador/cola humana
+    transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
+    twilio_validate_signature: bool = True
 
     @model_validator(mode="after")
     def _production_guards(self) -> "Settings":
@@ -50,6 +90,13 @@ class Settings(BaseSettings):
                 problems.append("STATE_BACKEND debe ser 'redis'")
             if "*" in self.cors_origins:
                 problems.append("CORS_ORIGINS no puede ser '*'")
+            if self.recording_storage == "local":
+                problems.append("RECORDING_STORAGE=local no es válido en producción (usa 's3')")
+            if self.telephony_provider == "twilio":
+                if not (self.twilio_account_sid and self.twilio_auth_token and self.telephony_public_url.startswith("https://")):
+                    problems.append("TELEPHONY_PROVIDER=twilio exige TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN y TELEPHONY_PUBLIC_URL https")
+                if not self.twilio_validate_signature:
+                    problems.append("TWILIO_VALIDATE_SIGNATURE no puede desactivarse en producción")
             if problems:
                 raise ValueError("Configuración insegura para producción: " + "; ".join(problems))
         return self
