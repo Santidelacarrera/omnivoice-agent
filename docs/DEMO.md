@@ -7,6 +7,12 @@ herramienta con resultado** y **métricas con metodología reproducible**.
 > `GEMINI_API_KEY`/`OPENAI_API_KEY`) y un micrófono. Todo lo demás está listo: el guion automático, la captura de evidencias y el
 > informe. Abajo hay una ejecución del guion contra el pipeline **simulado** para que se vea el formato exacto de lo que producirá.
 
+## Atajo: todo lo verificable con proveedores reales en un comando
+```bash
+cd backend && export DEEPGRAM_API_KEY=... ANTHROPIC_API_KEY=... && bash bench/run_real.sh
+```
+Ejecuta los contratos, arranca el backend en cascada, mide (red ideal y lenta), genera el informe y la demo con voz sintetizada en `docs/real-results/`. Se detiene si los contratos fallan.
+
 ## Opción 1 — en el navegador (la grabación de pantalla)
 1. `cp .env.example .env`, añade las claves y `docker compose up --build`.
 2. Abre `http://localhost:4310/conversation`, elige voz e idioma y pulsa iniciar.
