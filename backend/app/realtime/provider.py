@@ -144,4 +144,6 @@ class FakeProvider:
             yield ev
 
     async def close(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()  # sin tareas huérfanas tras cerrar
         await self._q.put(None)

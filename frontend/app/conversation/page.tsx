@@ -14,8 +14,10 @@ export default function Conversation() {
   const [muted, setMuted] = useState(false);
   const [level, setLevel] = useState(0);
   const [lines, setLines] = useState<{ who: "user" | "agent"; text: string }[]>([]);
-  const [metrics, setMetrics] = useState<{ firstAudioMs?: number; bargeInMs?: number }>({});
+  const [metrics, setMetrics] = useState<{ firstAudioMs?: number; bargeInMs?: number; sttMs?: number; llmMs?: number; ttsMs?: number }>({});
   const [tool, setTool] = useState<string | null>(null);
+  const [toolResult, setToolResult] = useState<{ name: string; ok?: boolean; data?: unknown } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [voice, setVoice] = useState("");
@@ -35,12 +37,16 @@ export default function Conversation() {
     // Demo: token de desarrollo. En producción, el token proviene de tu proveedor de identidad.
     let token: string;
     try { token = await getToken("customer"); } catch { setState("error"); return; }
-    setLines([]); setMetrics({}); setError(null); setRecording(false);
+    setLines([]); setMetrics({}); setError(null); setToolResult(null); setNotice(null); setRecording(false);
     client.current = new VoiceClient(token, {
       onState: setState,
       onTranscript: (who, text) => setLines((l) => [...l, { who, text }]),
       onMetrics: (m) => setMetrics((p) => ({ ...p, ...m })),
-      onTool: (n, phase) => setTool(phase === "start" ? n : null),
+      onTool: (n, phase, ok, data) => {
+        setTool(phase === "start" ? n : null);
+        if (phase === "end") setToolResult({ name: n, ok, data });
+      },
+      onNotice: setNotice,
       onLevel: setLevel,
       onError: setError,
       onRecording: setRecording,
@@ -135,7 +141,21 @@ export default function Conversation() {
       <dl className="grid grid-cols-2 gap-2 text-sm">
         <div className="rounded bg-slate-100 p-3"><dt className="text-slate-500">Primer audio</dt><dd>{metrics.firstAudioMs ?? "—"} ms</dd></div>
         <div className="rounded bg-slate-100 p-3"><dt className="text-slate-500">Silencio tras interrupción</dt><dd>{metrics.bargeInMs ?? "—"} ms</dd></div>
+        {metrics.sttMs !== undefined && (
+          <div className="col-span-2 rounded bg-slate-100 p-3">
+            <dt className="text-slate-500">Última respuesta por etapas</dt>
+            <dd>STT {metrics.sttMs} ms · LLM {metrics.llmMs ?? "—"} ms · TTS {metrics.ttsMs ?? "—"} ms</dd>
+          </div>
+        )}
       </dl>
+
+      {notice && <p role="status" className="rounded bg-amber-100 p-3 text-sm text-amber-900">{notice}</p>}
+      {toolResult && (
+        <section aria-label="Última herramienta" className="rounded border p-3 text-sm">
+          <b>{toolResult.name}</b> {toolResult.ok ? "✓" : "✗"}
+          <pre className="mt-1 overflow-x-auto text-xs text-slate-600">{JSON.stringify(toolResult.data ?? null, null, 2)}</pre>
+        </section>
+      )}
     </main>
   );
 }

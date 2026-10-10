@@ -1,0 +1,61 @@
+{
+  "meta": {
+    "timestamp": "2026-10-10T18:31:12Z",
+    "url": "http://127.0.0.1:8011",
+    "duration_s": 20.0,
+    "provider_mode": "simulated",
+    "label": "A. 1 conversaci\u00f3n, red ideal",
+    "rtt_ms": 0,
+    "jitter_ms": 0,
+    "seed": 1,
+    "server_provider": "cascade"
+  },
+  "clients": 1,
+  "connected": 1,
+  "rejected": 0,
+  "timeouts": 0,
+  "errors": 0,
+  "stages_ms": {
+    "stt": {
+      "count": 14,
+      "p50": 431.1,
+      "p95": 489.8,
+      "p99": 489.8
+    },
+    "llm": {
+      "count": 14,
+      "p50": 249.5,
+      "p95": 348.5,
+      "p99": 348.5
+    },
+    "tts": {
+      "count": 14,
+      "p50": 153.1,
+      "p95": 207.7,
+      "p99": 207.7
+    }
+  },
+  "cost": {
+    "sessions": 1,
+    "minutes": 0.341,
+    "cost_usd": 0.022285,
+    "cost_per_minute_usd": 0.06529,
+    "by_component_usd": {
+      "stt": 0.002875,
+      "llm": 0.00735,
+      "tts": 0.01206
+    }
+  },
+  "first_audio_ms": {
+    "count": 14,
+    "p50": 825.7,
+    "p95": 936.5,
+    "p99": 936.5
+  },
+  "barge_in_roundtrip_ms": {
+    "count": 14,
+    "p50": 0.8,
+    "p95": 1.0,
+    "p99": 1.0
+  }
+}

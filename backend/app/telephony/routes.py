@@ -3,6 +3,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import time
 import uuid
 from typing import Any, Callable
 from urllib.parse import parse_qs
@@ -136,16 +137,20 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                     agent = await app.state.db.get_agent(principal.org_id, agent_id) if agent_id else None
                     org_id = principal.org_id
 
-                    async def on_close(_s: VoiceSession, org_id=org_id):
+                    async def on_close(sess: VoiceSession, org_id=org_id):
                         live.pop(session_key, None)
                         await app.state.store.release_session(org_id, session_key)
+                        try:  # mismo consumo diario que las sesiones web
+                            await app.state.store.add_usage(org_id, time.monotonic() - sess.metrics.started_at)
+                        except Exception:  # noqa: BLE001
+                            log.exception("usage_accounting_failed", session=sess.id)
 
                     session = VoiceSession(
                         principal, make_provider(), registry, sender, s, persistence=app.state.db,
                         instructions=(agent["instructions"] if agent else
                                       "Eres un agente telefónico de atención al cliente. Responde breve y usa herramientas para datos reales."),
                         allowed_tools=set(agent["tools"]) if agent and agent["tools"] else None,
-                        on_close=on_close,
+                        on_close=on_close, provider_factory=make_provider,
                         # Sin consentimiento explícito no se graba: por teléfono se exigiría un aviso/confirmación previa.
                         options=SessionOptions(recording_consent=False,
                                                voice=(agent or {}).get("voice"),

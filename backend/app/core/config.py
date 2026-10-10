@@ -26,10 +26,42 @@ class Settings(BaseSettings):
     openai_realtime_url: str = "wss://api.openai.com/v1/realtime"
     openai_realtime_model: str = "gpt-realtime"
     # Proveedor de voz en la nube. "auto": Gemini si hay GEMINI_API_KEY, si no OpenAI si hay clave, si no simulado.
-    voice_provider: Literal["auto", "gemini", "openai"] = "auto"
+    voice_provider: Literal["auto", "gemini", "openai", "cascade"] = "auto"
     gemini_api_key: str = ""
     gemini_live_model: str = "gemini-3.8-live"
     gemini_voices: list[str] = ["Kore", "Puck", "Charon", "Fenrir", "Aoede", "Leda", "Orus", "Zephyr"]
+
+    # Pipeline en cascada (STT -> LLM -> TTS): permite medir cada etapa por separado.
+    # Se activa con VOICE_PROVIDER=cascade (o en "auto" si no hay clave de Gemini/OpenAI pero sí estas dos).
+    deepgram_api_key: str = ""
+    deepgram_stt_url: str = "wss://api.deepgram.com/v1/listen"
+    deepgram_tts_url: str = "https://api.deepgram.com/v1/speak"
+    deepgram_stt_model: str = "nova-3"
+    deepgram_stt_endpointing_ms: int = 300  # silencio que Deepgram necesita para dar por terminado el turno
+    deepgram_tts_voices: dict[str, str] = {"es": "aura-2-celeste-es", "en": "aura-2-thalia-en"}
+    anthropic_api_key: str = ""
+    anthropic_url: str = "https://api.anthropic.com/v1/messages"
+    cascade_llm_model: str = "claude-haiku-5-5"
+    cascade_max_tokens: int = 300
+    cascade_history_messages: int = 20  # tope de mensajes de contexto enviados al LLM (coste y latencia acotados)
+    cascade_max_tool_rounds: int = 4
+    cascade_turn_timeout_s: float = 30.0
+
+    # Fallos de proveedor: conexión con plazo, reconexión acotada por sesión y tope global de sesiones.
+    provider_connect_timeout_s: float = 10.0
+    provider_max_reconnects: int = 3  # por sesión
+    provider_reconnect_backoff_s: float = 0.5  # exponencial: 0.5, 1, 2...
+    max_total_sessions: int = 200  # por proceso, todas las organizaciones (protege el consumo de proveedores)
+    org_daily_budget_minutes: float = 0  # minutos de conversación por organización y día UTC; 0 = sin tope
+
+    # Precios de REFERENCIA para estimar el coste (USD). Son configuración, no hechos: verifica las tarifas vigentes de
+    # cada proveedor antes de usarlas para facturar o decidir. El consumo (minutos, tokens, caracteres) sí se mide.
+    price_s2s_in_per_min: float = 0.06  # audio de entrada del proveedor voz-a-voz
+    price_s2s_out_per_min: float = 0.24  # audio de salida del proveedor voz-a-voz
+    price_stt_per_min: float = 0.0077
+    price_tts_per_1k_chars: float = 0.030
+    price_llm_in_per_mtok: float = 1.0
+    price_llm_out_per_mtok: float = 5.0
 
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:4310"]
     ws_ticket_ttl_seconds: int = 30
@@ -87,10 +119,16 @@ class Settings(BaseSettings):
     def active_provider(self) -> str:
         if self.voice_provider != "auto":
             return self.voice_provider
-        return "gemini" if self.gemini_api_key else "openai" if self.openai_api_key else "simulated"
+        if self.gemini_api_key:
+            return "gemini"
+        if self.openai_api_key:
+            return "openai"
+        return "cascade" if self.deepgram_api_key and self.anthropic_api_key else "simulated"
 
     @property
     def available_voices(self) -> list[str]:
+        if self.active_provider == "cascade":
+            return sorted(set(self.deepgram_tts_voices.values()))
         return self.gemini_voices if self.active_provider == "gemini" else self.allowed_voices
 
     @model_validator(mode="after")

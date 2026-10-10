@@ -1,6 +1,8 @@
 import asyncio
 import json
+import re
 import struct
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Any, Callable
@@ -13,7 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.catalog import LANGUAGE_NAMES
 from app.core.config import Settings, get_settings
-from app.observability.metrics import BARGE_WINDOW, ERRORS, TTFB_WINDOW
+from app.observability.metrics import (BARGE_WINDOW, BUDGET_REJECTED, COST_WINDOW, ERRORS, STAGE_WINDOWS,
+                                       TTFB_WINDOW)
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.realtime.provider import FakeProvider, OpenAIRealtimeProvider, RealtimeProvider
 from app.security.auth import Principal, issue_token, require
@@ -179,6 +182,12 @@ def create_app(
         async def dev_token(body: DevLogin):
             return {"token": issue_token(body.user_id, body.org_id, body.role)}
 
+    async def budget_remaining_s(org_id: str) -> float:
+        """Segundos de conversación que le quedan hoy a la organización (inf si no hay tope)."""
+        if s.org_daily_budget_minutes <= 0:
+            return float("inf")
+        return s.org_daily_budget_minutes * 60 - await app.state.store.usage_seconds(org_id)
+
     # ---------- sesiones ----------
     @app.post("/api/v1/sessions")
     async def create_session(body: CreateSessionBody | None = None, p: Principal = Depends(authed("session:create"))):
@@ -189,6 +198,12 @@ def create_app(
             raise HTTPException(404, "Agente no encontrado")
         if await app.state.store.active_sessions(p.org_id) >= s.max_sessions_per_org:
             raise HTTPException(429, "Capacidad de la organización agotada")
+        if len(live) >= s.max_total_sessions:
+            BUDGET_REJECTED.labels("global_concurrency").inc()
+            raise HTTPException(429, "Capacidad del servicio agotada")
+        if await budget_remaining_s(p.org_id) <= 0:
+            BUDGET_REJECTED.labels("org_daily_budget").inc()
+            raise HTTPException(429, "Presupuesto diario de conversación de la organización agotado")
         voice = body.voice if body else None
         language = body.language if body else None
         if voice and voice not in s.available_voices:
@@ -274,6 +289,9 @@ def create_app(
             "active_sessions": await app.state.store.active_sessions(p.org_id),
             "first_audio_ms": TTFB_WINDOW.percentiles(scale=1000),
             "barge_in_ms": BARGE_WINDOW.percentiles(scale=1000),
+            "stage_ms": {k: w.percentiles(scale=1000) for k, w in STAGE_WINDOWS.items()},
+            "cost": COST_WINDOW.summary(),
+            "provider": s.active_provider,
             "usage": await app.state.db.usage_summary(p.org_id),
             "note": "Percentiles del proceso actual sobre las últimas muestras; para series históricas usa Prometheus.",
         }
@@ -290,6 +308,10 @@ def create_app(
             from app.realtime.gemini import GeminiLiveProvider
 
             return GeminiLiveProvider(s)
+        if s.active_provider == "cascade" and s.deepgram_api_key and s.anthropic_api_key:
+            from app.realtime.cascade import build_cascade
+
+            return build_cascade(s)
         if s.openai_api_key:
             return OpenAIRealtimeProvider(s)
         # Modo simulado: responde una vez por sesión para poder ver la interfaz sin clave ni crédito.
@@ -312,6 +334,11 @@ def create_app(
             voice=opts.get("voice") or (agent or {}).get("voice"),
             language=opts.get("language") or (agent or {}).get("language"))
         session_key = uuid.uuid4().hex
+        remaining = await budget_remaining_s(principal.org_id)
+        if remaining <= 0 or len(live) >= s.max_total_sessions:
+            BUDGET_REJECTED.labels("org_daily_budget" if remaining <= 0 else "global_concurrency").inc()
+            await ws.close(code=WS_CLOSE_CAPACITY)
+            return
         if not await app.state.store.acquire_session(principal.org_id, session_key, s.max_sessions_per_org):
             await ws.close(code=WS_CLOSE_CAPACITY)
             return
@@ -322,20 +349,24 @@ def create_app(
             else:
                 await ws.send_text(json.dumps(msg))
 
-        async def on_close(_sess: VoiceSession):
+        async def on_close(sess: VoiceSession):
             live.pop(session_key, None)
+            try:  # el consumo se carga al cerrar; el tope por sesión (deadline) acota lo que puede pasar entre medias
+                await app.state.store.add_usage(principal.org_id, time.monotonic() - sess.metrics.started_at)
+            except Exception:  # noqa: BLE001
+                log.exception("usage_accounting_failed", session=sess.id)
             await app.state.store.release_session(principal.org_id, session_key)
 
         session: VoiceSession | None = None
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + s.max_session_seconds
+        deadline = loop.time() + min(s.max_session_seconds, remaining)  # el presupuesto restante también acota la sesión
         try:
             await ws.accept()
             session = VoiceSession(
                 principal, make_provider(), registry, send, s, persistence=app.state.db,
                 instructions=agent["instructions"] if agent else "Eres un agente de atención al cliente. Responde breve y usa herramientas para datos reales.",
                 allowed_tools=set(agent["tools"]) if agent and agent["tools"] else None,
-                on_close=on_close, options=options, recording_storage=storage,
+                on_close=on_close, options=options, recording_storage=storage, provider_factory=make_provider,
                 recording_allowed=options.recording_consent,  # ya validado contra la política en create_session
             )
             live[session_key] = session
@@ -405,8 +436,32 @@ def _postgres_repo() -> Repository:
     return PostgresRepository()
 
 
+_SECRET_PATTERNS = [
+    re.compile(r"(?i)([?&](?:key|api_key|token|ticket)=)[^&\s\"']+"),
+    re.compile(r"(?i)((?:bearer|token)\s+)[A-Za-z0-9._\-]{8,}"),
+    re.compile(r"\b(?:sk-[A-Za-z0-9_\-]{8,}|AIza[0-9A-Za-z_\-]{20,})(?![A-Za-z0-9_\-])"),
+]
+
+
+def redact_secrets(_logger, _method, event_dict):
+    """Política de logs: ninguna credencial llega a un log, ni dentro de una excepción o una URL.
+    Los transcripts y el audio no se registran en ningún punto del código (hay una prueba que lo verifica)."""
+    def clean(v):
+        if isinstance(v, str):
+            for pat in _SECRET_PATTERNS:
+                v = pat.sub(lambda m: (m.group(1) if m.lastindex else "") + "[REDACTED]", v)
+            for secret in (s_.openai_api_key, s_.gemini_api_key, s_.deepgram_api_key, s_.anthropic_api_key,
+                           s_.twilio_auth_token):
+                if secret and len(secret) >= 8:
+                    v = v.replace(secret, "[REDACTED]")
+        return v
+    s_ = get_settings()
+    return {k: clean(v) for k, v in event_dict.items()}
+
+
 structlog.configure(processors=[
     structlog.contextvars.merge_contextvars,
+    redact_secrets,
     structlog.processors.add_log_level,
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.JSONRenderer(),

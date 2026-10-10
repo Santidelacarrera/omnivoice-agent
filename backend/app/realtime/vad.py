@@ -66,6 +66,7 @@ class VoiceActivityDetector:
         self._speech_ms = 0.0
         self._silence_ms = 0.0
         self.speaking = False
+        self.last_voiced = False  # ¿el último chunk contenía voz? (distinto de `speaking`, que incluye el hangover)
 
     def _is_speech(self, chunk: bytes) -> bool:
         return rms_pcm16(chunk) >= self.threshold
@@ -73,7 +74,9 @@ class VoiceActivityDetector:
     def feed(self, chunk: bytes) -> str | None:
         """Devuelve 'speech_start', 'speech_end' o None."""
         ms = (len(chunk) / 2) / self.sample_rate * 1000
-        if self._is_speech(chunk):
+        voiced = self._is_speech(chunk)
+        self.last_voiced = voiced
+        if voiced:
             self._speech_ms += ms
             self._silence_ms = 0.0
             if not self.speaking and self._speech_ms >= self.min_speech_ms:

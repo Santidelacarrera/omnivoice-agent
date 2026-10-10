@@ -47,10 +47,33 @@ Los fallos de escritura se registran y se cuentan (`omnivoice_errors_total{kind=
 conversación. **Trade-off asumido:** ante una caída prolongada de PostgreSQL se pierde auditoría de esas sesiones.
 Si el requisito legal fuese "sin auditoría no hay llamada", cambiar `_safe` por fallo duro en `pg_persistence.py`.
 
+## ADR-7: Proveedor en cascada además de voz-a-voz
+**Decisión.** Además de los proveedores voz-a-voz (OpenAI Realtime, Gemini Live) existe `CascadedProvider`: STT en streaming (Deepgram) →
+LLM en streaming con herramientas (Anthropic) → TTS en streaming (Deepgram), tras el mismo contrato `RealtimeProvider`.
+**Por qué.** Un servicio voz-a-voz no permite medir ni optimizar por separado reconocimiento, inferencia y síntesis; la cascada sí
+(eventos `stage` → `omnivoice_stage_seconds{stage}`), y permite cambiar cada pieza. **Coste.** Más latencia base (el endpointing del STT
+suma ~300 ms) y tres servicios que pueden fallar. **Detalles clave:** el LLM y el TTS se solapan por frases (el TTS empieza con la primera frase);
+el barge-in cancela las tareas (se cierra el stream HTTP del LLM, no solo se ignora su salida); un turno interrumpido solo conserva en el historial
+lo que se llegó a decir, nunca un `tool_use` sin su `tool_result`.
+
+## ADR-8: Recuperación de fallos del proveedor, acotada
+**Decisión.** Si el proveedor cae (error, cierre del flujo, fallo al enviar), la sesión crea uno nuevo con la fábrica del servidor, le pasa
+los últimos 6 intercambios (solo en memoria) como contexto, avisa al cliente (`provider.reconnecting` / `provider.reconnected`) y descarta el turno en curso
+(época nueva + `audio.clear`). Tope: `PROVIDER_MAX_RECONNECTS` por sesión con espera exponencial; agotado, `provider_unavailable` y estado `ERROR`.
+Toda conexión tiene plazo (`PROVIDER_CONNECT_TIMEOUT_S`). **Por qué.** Una caída de red de un segundo no debe costar la llamada, pero reintentar sin
+límite convierte un incidente del proveedor en consumo y sesiones zombi. **Invariantes verificadas por tests:** sin tareas huérfanas tras cerrar (también
+cerrando a mitad de una reconexión), un proveedor que termina de conectar después del cierre se cierra, y los eventos de un proveedor sustituido se ignoran.
+En el STT de Deepgram, la reconexión es interna (el audio durante el corte se descarta, no se acumula).
+
+## ADR-9: Medir el fin de turno desde la última voz, no desde el fin declarado por el VAD
+El VAD declara «fin de habla» tras 600 ms de silencio (hangover). Medir desde ahí ocultaba esos 600 ms y perdía muestras cuando el proveedor respondía antes.
+Ahora el fin de turno es el último chunk con voz (ver `docs/LATENCY.md` §1). Efecto: las cifras publicadas antes de este cambio no son comparables.
+
 ## Límites conocidos
 - Los percentiles de `/api/v1/metrics` son por proceso; en varias réplicas usar Prometheus (histogramas) y agregar.
 - El rate limiter es de ventana fija (permite ráfagas de hasta 2× el límite en el cambio de ventana).
 - El VAD por energía no distingue voz de ruido fuerte; para entornos ruidosos sustituir por Silero VAD o WebRTC VAD.
 - No hay SSO ni gestión de usuarios: el JWT lo emite un proveedor de identidad externo; `/auth/dev-token` solo existe
   fuera de producción.
-- El audio no se persiste. Si se necesita grabación hay que añadir almacenamiento de objetos con consentimiento y retención.
+- El audio no se persiste salvo grabación con consentimiento (ver README).
+- El presupuesto diario por organización se carga al cerrar la sesión (ver `docs/COSTS.md`).

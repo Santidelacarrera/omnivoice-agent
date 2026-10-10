@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -11,7 +12,8 @@ import structlog
 
 from app.core.catalog import language_directive
 from app.core.config import Settings
-from app.observability.metrics import ACTIVE_SESSIONS, ERRORS, RECORDINGS, SessionMetrics
+from app.observability.metrics import (ACTIVE_SESSIONS, COST_WINDOW, ERRORS, PROVIDER_RECONNECTS, RECORDINGS,
+                                       SessionMetrics)
 from app.orchestration.state_machine import InvalidTransition, SessionStateMachine, State
 from app.realtime.provider import RealtimeProvider
 from app.realtime.vad import create_vad
@@ -50,6 +52,7 @@ class VoiceSession:
         recording_storage: Any = None,
         recording_allowed: bool = False,
         transfer_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        provider_factory: Callable[[], RealtimeProvider] | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
         self.correlation_id = uuid.uuid4().hex  # une logs, eventos y auditoría de esta sesión
@@ -83,6 +86,16 @@ class VoiceSession:
         self._closed = False
         self._provider_failed = False
         self._counted = False  # ACTIVE_SESSIONS solo se decrementa si se incrementó
+        # Reconexión: con fábrica, un fallo del proveedor se intenta recuperar (acotado) antes de dar la sesión por perdida.
+        self.provider_factory = provider_factory
+        self._recovering = False
+        self._reconnects = 0
+        self._recent: deque[tuple[str, str]] = deque(maxlen=6)  # solo en memoria; contexto al reconectar
+        self._usage_carry: dict[str, float] = {}
+        self._audio_out_bytes = 0
+        self._full_instructions = ""
+        self.cost_usd: float | None = None
+        self._stages: dict[str, float] = {}
 
     async def _audit(self, action: str, detail: dict[str, Any] | None = None) -> None:
         d = {"session_id": self.id, "correlation_id": self.correlation_id, **(detail or {})}
@@ -91,14 +104,16 @@ class VoiceSession:
 
     async def start(self) -> None:
         self.conversation_id = await self.db.start_conversation(self.principal.org_id, self.id, self.principal.user_id)
-        await self.provider.connect(self.instructions + language_directive(self.options.language),
-                                    self.registry.schemas(self.allowed_tools),
-                                    voice=self.options.voice, language=self.options.language)
+        self._full_instructions = self.instructions + language_directive(self.options.language)
+        await asyncio.wait_for(
+            self.provider.connect(self._full_instructions, self.registry.schemas(self.allowed_tools),
+                                  voice=self.options.voice, language=self.options.language),
+            timeout=self.settings.provider_connect_timeout_s)
         if self.conversation_id:
             await self.db.set_conversation_options(
                 self.principal.org_id, self.conversation_id, recording_consent=self.recorder is not None,
                 voice=self.options.voice, language=self.options.language)
-        self._spawn(self._provider_loop())
+        self._spawn(self._provider_loop(self.provider))
         ACTIVE_SESSIONS.inc()
         self._counted = True
         self._set(State.LISTENING)
@@ -131,14 +146,15 @@ class VoiceSession:
         if seq is not None:
             self.metrics.track_seq(seq)
         event = self.vad.feed(pcm)
+        if self.vad.speaking and self.vad.last_voiced:
+            self.metrics.mark_voice()  # el fin del turno es el ÚLTIMO chunk con voz, no el fin declarado por el VAD
         if event == "speech_start":
             self._cancel_hint()  # el servidor confirmó voz: la interrupción se resuelve aquí
             await self.handle_barge_in()
         elif event == "speech_end":
-            self.metrics.mark_user_speech_end()
             self._set(State.PROCESSING)
-        if self._provider_failed:
-            return
+        if self._provider_failed or self._recovering:
+            return  # reconectando: el audio de ese intervalo se descarta (no se acumula sin límite)
         try:
             await self.provider.send_audio(pcm)
         except Exception as exc:  # noqa: BLE001 - el proveedor cerró o rechazó la conexión
@@ -238,22 +254,22 @@ class VoiceSession:
         return True
 
     # ---- eventos del proveedor ----
-    async def _provider_loop(self) -> None:
+    async def _provider_loop(self, prov: RealtimeProvider) -> None:
         try:
-            async for ev in self.provider.events():
+            async for ev in prov.events():
+                if prov is not self.provider:
+                    return  # proveedor sustituido tras una reconexión: sus eventos ya no cuentan
                 await self._on_provider_event(ev)
-            if not self._closed and not self._provider_failed:
+            if not self._closed and prov is self.provider:
                 # El proveedor cerró el flujo sin error: sin esto el usuario se queda hablando al vacío.
                 await self._provider_failure("stream_closed", None)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
-            ERRORS.labels("provider_loop").inc()
-            log.exception("provider_loop_failed", session=self.id)
-            self._provider_failed = True
-            self._set(State.ERROR)
-            await self.send({"type": "error", "message": "provider_unavailable"})
-            await self._audit("session.provider_error")
+        except Exception as exc:  # noqa: BLE001
+            if prov is self.provider:
+                ERRORS.labels("provider_loop").inc()
+                log.exception("provider_loop_failed", session=self.id)
+                await self._provider_failure("provider_loop", exc)
 
     async def _on_provider_event(self, ev: dict[str, Any]) -> None:
         t = ev["type"]
@@ -263,15 +279,18 @@ class VoiceSession:
             if self.sm.state != State.RESPONDING:
                 self._set(State.RESPONDING)
             self._agent_speaking = True
-            ttfb = self.metrics.mark_audio_out()
+            ttfb = None if self.vad.last_voiced else self.metrics.mark_audio_out()  # no cuenta si el usuario sigue hablando
             if ttfb is not None:
                 self.first_audio_ms = round(ttfb * 1000)
-                await self.send({"type": "metrics", "first_audio_ms": self.first_audio_ms})
+                await self.send({"type": "metrics", "first_audio_ms": self.first_audio_ms, **self._stages})
+                self._stages = {}
+            self._audio_out_bytes += len(ev["audio"])
             await self.send(ev["audio"])
             if self.recorder:
                 self.recorder.add_agent(ev["audio"])
         elif t in ("transcript_user", "transcript_agent"):
             await self.send({"type": t, "text": ev["text"]})
+            self._recent.append(("user" if t == "transcript_user" else "agent", ev["text"]))
             if self.conversation_id:
                 speaker = "user" if t == "transcript_user" else "agent"
                 await self.db.add_transcript(self.principal.org_id, self.conversation_id, speaker, ev["text"])
@@ -282,22 +301,104 @@ class VoiceSession:
             if self.sm.state in (State.RESPONDING, State.PROCESSING):
                 self._set(State.LISTENING)
             await self.send({"type": "state", "state": self.sm.state.value})
+        elif t == "stage":
+            if ev["stage"] == "stt_final":
+                if self.metrics.last_voice_at is not None:
+                    stt = ev["t"] - self.metrics.last_voice_at
+                    self.metrics.mark_stage("stt", stt)
+                    self._stages["stt"] = round(max(0.0, stt) * 1000, 1)
+            else:
+                self.metrics.mark_stage(ev["stage"], ev["ms"] / 1000)
+                self._stages[ev["stage"]] = ev["ms"]
         elif t == "error":
             ERRORS.labels("provider_event").inc()
             log.warning("provider_error_event", session=self.id, message=str(ev.get("message"))[:300])
             await self.send({"type": "error", "message": ev["message"]})
 
     async def _provider_failure(self, where: str, exc: Exception | None) -> None:
-        """Registra el motivo real (visible en `docker compose logs backend`) y avisa una sola vez al cliente."""
+        """Registra el motivo real (visible en los logs) y, si hay fábrica y presupuesto de reintentos, reconecta;
+        si no, avisa una sola vez al cliente y deja la sesión en ERROR."""
+        if self._provider_failed or self._recovering or self._closed:
+            return
+        log.warning("provider_failed", session=self.id, where=where,
+                    error=type(exc).__name__ if exc else "closed", detail=str(exc)[:300] if exc else "")
+        if self.provider_factory is not None and self._reconnects < self.settings.provider_max_reconnects:
+            self._recovering = True
+            self._spawn(self._reconnect(where))
+            return
+        await self._fail_terminal(where)
+
+    async def _fail_terminal(self, where: str) -> None:
         if self._provider_failed:
             return
         self._provider_failed = True
+        self._recovering = False
         ERRORS.labels("provider_loop").inc()
-        log.warning("provider_failed", session=self.id, where=where,
-                    error=type(exc).__name__ if exc else "closed", detail=str(exc)[:300] if exc else "")
         self._set(State.ERROR)
         await self.send({"type": "error", "message": "provider_unavailable"})
-        await self._audit("session.provider_error", {"where": where})
+        await self._audit("session.provider_error", {"where": where, "reconnects": self._reconnects})
+
+    def _recovery_context(self) -> str:
+        if not self._recent:
+            return ""
+        lines = "\n".join(f"{'Usuario' if who == 'user' else 'Agente'}: {txt}" for who, txt in self._recent)
+        return ("\n\nLa conexión se interrumpió y se ha restablecido. Continúa la conversación sin saludar de nuevo. "
+                f"Últimos intercambios:\n{lines}")
+
+    async def _reconnect(self, where: str) -> None:
+        """Sustituye el proveedor caído. El turno en curso se da por perdido (época nueva, audio vaciado)."""
+        self._epoch += 1
+        self._agent_speaking = False
+        if self.sm.state in (State.RESPONDING, State.TOOL_RUNNING):
+            self._set(State.INTERRUPTED)
+        self._set(State.LISTENING)
+        await self.send({"type": "provider.reconnecting"})
+        await self.send({"type": "audio.clear"})
+        old = self.provider
+        for k, v in (getattr(old, "usage", None) or {}).items():
+            self._usage_carry[k] = self._usage_carry.get(k, 0) + v
+        try:
+            await asyncio.wait_for(old.close(), timeout=3)
+        except Exception:  # noqa: BLE001 - el proveedor viejo ya estaba roto
+            pass
+        for attempt in range(self.settings.provider_max_reconnects):
+            if self._closed:
+                return
+            self._reconnects += 1
+            await asyncio.sleep(self.settings.provider_reconnect_backoff_s * 2 ** attempt)
+            new = self.provider_factory()  # type: ignore[misc]
+            try:
+                await asyncio.wait_for(
+                    new.connect(self._full_instructions + self._recovery_context(),
+                                self.registry.schemas(self.allowed_tools),
+                                voice=self.options.voice, language=self.options.language),
+                    timeout=self.settings.provider_connect_timeout_s)
+            except asyncio.CancelledError:  # la sesión se cerró en plena conexión: no dejar el proveedor nuevo huérfano
+                try:
+                    await asyncio.shield(new.close())
+                except Exception:  # noqa: BLE001
+                    pass
+                raise
+            except Exception as exc:  # noqa: BLE001
+                PROVIDER_RECONNECTS.labels("failed").inc()
+                log.warning("provider_reconnect_failed", session=self.id, attempt=attempt + 1,
+                            error=type(exc).__name__)
+                try:
+                    await new.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            if self._closed:  # la sesión terminó mientras se reconectaba: no dejar el proveedor nuevo huérfano
+                await new.close()
+                return
+            self.provider = new
+            self._recovering = False
+            self._spawn(self._provider_loop(new))
+            PROVIDER_RECONNECTS.labels("ok").inc()
+            await self.send({"type": "provider.reconnected", "attempt": attempt + 1})
+            await self._audit("session.provider_reconnected", {"where": where, "attempt": attempt + 1})
+            return
+        await self._fail_terminal(where)
 
     async def _run_tool(self, ev: dict[str, Any], epoch: int) -> None:
         self._set(State.TOOL_RUNNING)
@@ -329,11 +430,31 @@ class VoiceSession:
             ok = outcome.get("status") == "initiated"
             result = {"ok": ok, "data": {"transfer": outcome.get("status")}} if ok else {
                 "ok": False, "error": "transferencia_no_disponible"}
-        await self.send({"type": "tool.end", "name": ev["name"], "ok": result.get("ok", False)})
+        # El resultado va solo al cliente de la propia sesión (para mostrarlo); no se registra en logs.
+        await self.send({"type": "tool.end", "name": ev["name"], "ok": result.get("ok", False),
+                         "data": result.get("data"), "error": result.get("error")})
         if epoch != self._epoch:
             return  # el usuario interrumpió; no se narra un resultado obsoleto
         self._set(State.PROCESSING)
         await self.provider.send_tool_result(ev["call_id"], result)
+
+    def _provider_usage(self) -> dict[str, float]:
+        usage = dict(self._usage_carry)
+        for k, v in (getattr(self.provider, "usage", None) or {}).items():
+            usage[k] = usage.get(k, 0) + v
+        return usage
+
+    def _cost_components(self) -> dict[str, float]:
+        """Coste estimado = consumo MEDIDO × precio configurado (`price_*` en Settings). No incluye red ni cómputo propio."""
+        s = self.settings
+        usage = self._provider_usage()
+        if "llm_in_tokens" in usage:  # cascada: se factura cada servicio por separado
+            return {"stt": usage["stt_seconds"] / 60 * s.price_stt_per_min,
+                    "llm": usage["llm_in_tokens"] / 1e6 * s.price_llm_in_per_mtok
+                           + usage["llm_out_tokens"] / 1e6 * s.price_llm_out_per_mtok,
+                    "tts": usage["tts_chars"] / 1000 * s.price_tts_per_1k_chars}
+        return {"s2s_in": self._audio_in_bytes / 2 / s.sample_rate / 60 * s.price_s2s_in_per_min,
+                "s2s_out": self._audio_out_bytes / 2 / s.sample_rate / 60 * s.price_s2s_out_per_min}
 
     async def close(self) -> None:
         if self._closed:
@@ -349,9 +470,14 @@ class VoiceSession:
         if self._counted:
             ACTIVE_SESSIONS.dec()
         seconds = self._audio_in_bytes / 2 / self.settings.sample_rate
+        duration = time.monotonic() - self.metrics.started_at
+        cost = self._cost_components()
+        self.cost_usd = round(sum(cost.values()), 6)
+        COST_WINDOW.add(duration, cost)
         summary = {"final_state": final_name, "first_audio_ms": self.first_audio_ms,
                    "interruptions": self.metrics.interruptions, "lost_packets": self.metrics.lost_packets,
-                   "audio_seconds": round(seconds, 2)}
+                   "audio_seconds": round(seconds, 2), "duration_s": round(duration, 2), "cost_usd": self.cost_usd,
+                   "reconnects": self._reconnects}
         if self.conversation_id:
             await self.db.end_conversation(self.principal.org_id, self.conversation_id, summary)
         await self._audit("session.completed", summary)
