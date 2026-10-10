@@ -73,7 +73,7 @@ cp .env.example .env          # Windows: copy .env.example .env
 docker compose up --build
 ```
 
-Para voz real basta una de dos claves: `GEMINI_API_KEY` (Google Gemini Live; hay clave gratuita en AI Studio) u `OPENAI_API_KEY`. Con ambas manda Gemini (`VOICE_PROVIDER=openai` fuerza OpenAI). Sin ninguna se usa un **proveedor simulado**, suficiente para ver la interfaz, las herramientas y las métricas.
+Para voz real basta una de estas opciones: `GEMINI_API_KEY` (Google Gemini Live; hay clave gratuita en AI Studio), `OPENAI_API_KEY`, o el **pipeline en cascada** `DEEPGRAM_API_KEY` + `ANTHROPIC_API_KEY` (STT → LLM → TTS; es el único que permite medir cada etapa por separado). Con varias manda Gemini → OpenAI → cascada (`VOICE_PROVIDER` fuerza uno). Sin ninguna se usa un **proveedor simulado**, suficiente para ver la interfaz, las herramientas y las métricas.
 La clave real va **solo en `.env`** (ignorado por Git), nunca en `.env.example`.
 
 | Qué | Dónde |
@@ -126,7 +126,7 @@ sequenceDiagram
 |---|---|
 | Audio (ambos sentidos) | binario: `[seq u32 big-endian][PCM16 24 kHz mono]`, frames de 20 ms |
 | Cliente → servidor (texto) | `barge_in`, `end` |
-| Servidor → cliente (texto) | `session.ready`, `audio.clear`, `transcript_user`, `transcript_agent`, `tool.start`, `tool.end`, `metrics`, `state`, `error` |
+| Servidor → cliente (texto) | `session.ready`, `audio.clear`, `transcript_user`, `transcript_agent`, `tool.start`, `tool.end` (con `data`), `metrics` (`first_audio_ms` + `stt`/`llm`/`tts` en cascada), `state`, `provider.reconnecting`, `provider.reconnected`, `error` |
 
 El número de secuencia permite **detectar paquetes perdidos** y exponerlos como métrica. Códigos de cierre:
 `4401` no autorizado · `4429` capacidad · `4408` tiempo de espera (inactividad de 60 s).
@@ -158,7 +158,8 @@ real devuelto al modelo. Las escrituras son idempotentes por `(org, call_id, too
   tamaño máximo de frame, inactividad y duración máxima de sesión.
 - **Configuración defensiva:** en `production` el proceso **se niega a arrancar** sin `JWT_SECRET` ≥ 32 caracteres,
   PostgreSQL y Redis, o con CORS `*`. El endpoint `dev-token` solo existe fuera de producción.
-- **Privacidad:** no se guardan los argumentos de las herramientas, solo sus claves; el audio no se persiste.
+- **Privacidad:** no se guardan los argumentos de las herramientas, solo sus claves; el audio no se persiste. Los logs no contienen audio, transcripciones ni argumentos, y las credenciales se redactan (también dentro de URLs/excepciones); hay tests que lo verifican.
+- **Fallos de proveedor:** plazo de conexión, reconexión acotada con contexto reciente y aviso al cliente (ADR-8), sin tareas huérfanas al cerrar; aislamiento entre sesiones y organizaciones comprobado por tests.
 - Cabeceras de seguridad HTTP y Dependabot semanal (solo versiones menores y parches).
 
 ## Observabilidad
@@ -166,7 +167,8 @@ real devuelto al modelo. Las escrituras son idempotentes por `(org, call_id, too
 - **Logs JSON** con `request_id` (HTTP) y `correlation_id` (sesión) para reconstruir una conversación concreta.
 - **Prometheus:** primer audio (TTFB), silencio tras interrupción, paquetes perdidos, duración y errores de herramientas,
   sesiones activas, errores por tipo.
-- **Percentiles** p50/p95/p99 en `GET /api/v1/metrics` (por proceso; entre réplicas, usa los histogramas).
+- **Percentiles** p50/p95/p99 en `GET /api/v1/metrics` (por proceso; entre réplicas, usa los histogramas): primer audio, barge-in, **latencia por etapa** (`stage_ms`: STT/LLM/TTS) y **coste por minuto** (`cost`).
+- Metodología de medición, resultados y objetivos: [`docs/LATENCY.md`](docs/LATENCY.md). Proveedores, controles de consumo y costes: [`docs/COSTS.md`](docs/COSTS.md). Demo: [`docs/DEMO.md`](docs/DEMO.md).
 - **Sondas:** `/healthz` (liveness) y `/readyz` (comprueba BD y Redis). Alertas sugeridas en [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ## API
@@ -194,6 +196,9 @@ Ver [`.env.example`](.env.example). Variables principales:
 | `ENVIRONMENT` | `development` | `production` activa las comprobaciones de arranque |
 | `PERSISTENCE_BACKEND` / `STATE_BACKEND` | `postgres` / `redis` | `memory` para desarrollo sin servicios |
 | `JWT_SECRET` | *(placeholder)* | ≥ 32 caracteres en producción |
+| `DEEPGRAM_API_KEY` + `ANTHROPIC_API_KEY` | vacío | pipeline en cascada (`VOICE_PROVIDER=cascade`); ver [`docs/COSTS.md`](docs/COSTS.md) |
+| `MAX_TOTAL_SESSIONS` / `ORG_DAILY_BUDGET_MINUTES` | `200` / `0` | tope global por proceso y presupuesto diario por organización (0 = sin tope) |
+| `PROVIDER_CONNECT_TIMEOUT_S` / `PROVIDER_MAX_RECONNECTS` | `10` / `3` | plazo de conexión y reintentos por sesión |
 | `GEMINI_API_KEY` | vacío | voz real con Google Gemini Live (`GEMINI_LIVE_MODEL`, por defecto `gemini-3.8-live`) |
 | `OPENAI_API_KEY` | vacío | voz real con OpenAI; sin ninguna clave = proveedor simulado |
 | `VOICE_PROVIDER` | `auto` | `auto` / `gemini` / `openai` |
@@ -239,7 +244,9 @@ Pasarela basada en Twilio Programmable Voice (número PSTN o SIP trunk) con Medi
 ```bash
 cd backend && pytest -q                                   # unitarias, servicios, API y WebSocket
 python -m bench.orchestrator_bench --sessions 200         # overhead del orquestador (sin red)
-python -m bench.loadtest --url http://localhost:8010 --clients 50 --duration 20   # extremo a extremo
+python -m bench.loadtest --url http://localhost:8010 --clients 50 --duration 20   # extremo a extremo (--rtt-ms/--jitter-ms: red lenta)
+bash bench/run_matrix.sh && python -m bench.check_slo ../docs/slo.json ../docs/bench-results/*.json   # matriz simulada sin claves + objetivos
+python -m bench.demo --url http://localhost:8010   # conversación guionizada con interrupción y herramienta (+ evidencias)
 cd ../frontend && npm run typecheck && npm run build
 ```
 
@@ -275,8 +282,10 @@ Conviene saber qué está verificado y qué no:
 - **No verificado:** contra el servicio real de OpenAI (las pruebas de contrato de `backend/tests/contract` existen y las
   ejecuta el workflow `contract` con tu clave; hasta que corran, el adaptador es una suposición); la telefonía contra un
   operador real (requiere tu cuenta Twilio y un túnel/URL pública); S3 real; el VAD con audio humano real en ruido.
-- **Latencia:** no hay cifras publicadas. Genera las tuyas con `bench.loadtest --out` + `bench.report`; el informe indica si
-  el proveedor era real o simulado. Los objetivos (p50 < 500 ms, barge-in p95 < 200 ms) siguen siendo **metas**.
+- **Latencia:** hay una metodología documentada y reproducible y cifras de la **plataforma** con un pipeline simulado ([`docs/LATENCY.md`](docs/LATENCY.md)): barge-in p95 ≈ 7 ms con 50 conversaciones, 0 errores hasta 200. **No hay cifras con proveedores reales** (requieren tus claves); los objetivos para proveedor real son provisionales y la regla para fijarlos está en el documento. Una cascada no puede cumplir p50 < 500 ms (el endpointing del STT ya son ~300 ms).
+- **Coste por minuto:** se mide el consumo y se multiplica por precios *configurables* de referencia; no hay cifra real publicada ([`docs/COSTS.md`](docs/COSTS.md)).
+- **Demo:** el guion, la captura de evidencias y el informe están listos; la grabación con voz y proveedores reales no está hecha ([`docs/DEMO.md`](docs/DEMO.md)).
+- **No verificado contra servicios reales:** los clientes de Deepgram y Anthropic (se probaron contra servidores locales; el contrato `tests/contract/test_cascade_contract.py` los verifica con tus claves).
 - **No implementado:** SSO y gestión de usuarios (el JWT lo emite tu proveedor de identidad), grabación de llamadas telefónicas
   (requiere aviso legal previo) y SIP directo sin intermediario (se usa Twilio como pasarela).
 - El rate limiter es de ventana fija (ráfagas de hasta 2× en el cambio de ventana).
@@ -285,7 +294,9 @@ Conviene saber qué está verificado y qué no:
 
 - [x] VAD basado en modelo · [x] Job de purga · [x] Grabación con consentimiento y S3 · [x] Selector de voz e idioma
 - [x] Telefonía por Twilio y transferencia a humano (pendiente de prueba con un operador real)
-- [ ] Ejecutar las pruebas de contrato con clave real y publicar `docs/LATENCY.md` con medición real
+- [x] Pipeline en cascada con latencia por etapa · [x] Reconexión acotada · [x] Presupuestos y coste/min · [x] Metodología de latencia y objetivos (`docs/LATENCY.md`)
+- [ ] Ejecutar las pruebas de contrato con claves reales y publicar la medición real (`--mode real`) y el coste/min real
+- [ ] Grabar la demo con voz real (`docs/DEMO.md`)
 - [ ] Aviso legal y grabación de llamadas telefónicas · SIP directo (sin intermediario)
 
 ---

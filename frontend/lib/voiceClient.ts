@@ -3,11 +3,13 @@ export type AgentState = "idle" | "connecting" | "listening" | "processing" | "r
 export interface VoiceEvents {
   onState: (s: AgentState) => void;
   onTranscript: (who: "user" | "agent", text: string) => void;
-  onMetrics: (m: { firstAudioMs?: number; bargeInMs?: number }) => void;
-  onTool: (name: string, phase: "start" | "end", ok?: boolean) => void;
+  onMetrics: (m: { firstAudioMs?: number; bargeInMs?: number; sttMs?: number; llmMs?: number; ttsMs?: number }) => void;
+  onTool: (name: string, phase: "start" | "end", ok?: boolean, data?: unknown) => void;
   onLevel: (rms: number) => void;
   onError?: (message: string) => void;
   onRecording?: (active: boolean) => void;
+  /** Aviso no fatal (p. ej. reconexión con el proveedor); null lo borra. */
+  onNotice?: (message: string | null) => void;
 }
 
 export interface SessionChoices {
@@ -122,14 +124,22 @@ export class VoiceClient {
       case "audio.resume": this.bargeAt = 0; this.playback?.port.postMessage({ type: "resume" }); break;
       case "transcript_user": this.ev.onTranscript("user", msg.text); break;
       case "transcript_agent": this.ev.onTranscript("agent", msg.text); break;
-      case "metrics": this.ev.onMetrics({ firstAudioMs: msg.first_audio_ms }); break;
+      case "metrics": this.ev.onMetrics({ firstAudioMs: msg.first_audio_ms, sttMs: msg.stt, llmMs: msg.llm, ttsMs: msg.tts }); break;
       case "tool.start": this.ev.onTool(msg.name, "start"); this.ev.onState("processing"); break;
-      case "tool.end": this.ev.onTool(msg.name, "end", msg.ok); break;
+      case "tool.end": this.ev.onTool(msg.name, "end", msg.ok, msg.data); break;
       case "state": this.agentSpeaking = false; this.ev.onState("listening"); break;
+      case "provider.reconnecting":
+        // El audio pendiente ya se descartó en el servidor; se vacía también aquí y se avisa sin cortar la llamada.
+        this.agentSpeaking = false;
+        this.playback?.port.postMessage({ type: "clear" });
+        this.ev.onNotice?.("Reconectando con el proveedor de voz…");
+        this.ev.onState("processing");
+        break;
+      case "provider.reconnected": this.ev.onNotice?.(null); this.ev.onState("listening"); break;
       case "error":
-        // El servidor avisa de un fallo (p. ej. el proveedor sin crédito): se libera el micrófono y se informa.
         this.ev.onError?.(String(msg.message ?? "error"));
-        void this.shutdown().then(() => this.ev.onState("error"));
+        // Solo es fatal si el servidor agotó la recuperación; un turno fallido (turn_failed) no debe colgar la llamada.
+        if (msg.message === "provider_unavailable") void this.shutdown().then(() => this.ev.onState("error"));
         break;
     }
   }

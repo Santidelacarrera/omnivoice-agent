@@ -1,0 +1,61 @@
+{
+  "meta": {
+    "timestamp": "2026-10-10T18:32:02Z",
+    "url": "http://127.0.0.1:8011",
+    "duration_s": 20.0,
+    "provider_mode": "simulated",
+    "label": "C. 50 conversaciones, red lenta (RTT 200 ms \u00b1 40)",
+    "rtt_ms": 200.0,
+    "jitter_ms": 40.0,
+    "seed": 1,
+    "server_provider": "cascade"
+  },
+  "clients": 50,
+  "connected": 50,
+  "rejected": 0,
+  "timeouts": 0,
+  "errors": 0,
+  "stages_ms": {
+    "stt": {
+      "count": 550,
+      "p50": 432.3,
+      "p95": 510.0,
+      "p99": 543.7
+    },
+    "llm": {
+      "count": 550,
+      "p50": 246.2,
+      "p95": 372.1,
+      "p99": 420.7
+    },
+    "tts": {
+      "count": 550,
+      "p50": 150.0,
+      "p95": 225.6,
+      "p99": 259.8
+    }
+  },
+  "cost": {
+    "sessions": 50,
+    "minutes": 17.316,
+    "cost_usd": 1.028683,
+    "cost_per_minute_usd": 0.05941,
+    "by_component_usd": {
+      "stt": 0.112933,
+      "llm": 0.28875,
+      "tts": 0.627
+    }
+  },
+  "first_audio_ms": {
+    "count": 550,
+    "p50": 1041.5,
+    "p95": 1198.2,
+    "p99": 1254.4
+  },
+  "barge_in_roundtrip_ms": {
+    "count": 550,
+    "p50": 205.0,
+    "p95": 261.5,
+    "p99": 273.8
+  }
+}

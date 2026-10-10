@@ -27,6 +27,15 @@
   `omni_app` no es superusuario (`SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname='omni_app'` debe dar `f,f`).
 - **Investigar una sesión**: buscar su `correlation_id` en `audit_logs.detail` y en los logs JSON.
 
+## Fallos de proveedor, límites y costes
+- **Reconexiones:** `omnivoice_provider_reconnects_total{outcome}` (`ok`/`failed`). Muchas `failed` seguidas = proveedor caído o clave/cuota: las sesiones
+  terminan con `provider_unavailable` tras `PROVIDER_MAX_RECONNECTS`. Alerta sugerida: `rate(omnivoice_provider_reconnects_total{outcome="failed"}[5m]) > 0`.
+- **429 / cierre 4429 inesperados:** `omnivoice_budget_rejected_total{reason}`: `global_concurrency` (sube `MAX_TOTAL_SESSIONS` o añade réplicas) u
+  `org_daily_budget` (consumo diario agotado; el contador es `usage:<org>:<YYYYMMDD>` en Redis y caduca solo; para levantar el tope antes, borra esa clave).
+- **Latencia por etapa:** `histogram_quantile(0.95, rate(omnivoice_stage_seconds_bucket{stage="llm"}[5m]))` (y `stt`, `tts`) localiza qué servicio degrada el primer audio (solo cascada).
+- **Coste/min:** ver `docs/COSTS.md`. Compara con tu factura real: los precios de `PRICE_*` son de referencia.
+- **Logs:** no contienen audio, transcripciones ni argumentos de herramientas; las credenciales se redactan (`redact_secrets`) incluso dentro de URLs y excepciones.
+
 ## Retención y borrado
 Un job (activo por defecto, `RETENTION_JOB_ENABLED`) purga cada `RETENTION_INTERVAL_SECONDS` lo anterior a
 `organizations.retention_days`. Borra primero los objetos de grabación y después las filas; un bloqueo en Redis evita
@@ -47,6 +56,7 @@ que dos réplicas lo ejecuten a la vez. La auditoría es solo-anexar y no se pur
   Con el proveedor simulado mide tu stack; con `OPENAI_API_KEY` mide también al proveedor y la red.
   Sube `--clients` hasta ver 429 o aumento de p95 para fijar la capacidad por réplica.
 
+Metodología completa, objetivos y resultados: `docs/LATENCY.md` (`bash bench/run_matrix.sh` los reproduce sin claves).
 Informe publicable: `python -m bench.loadtest --url ... --clients 50 --duration 30 --mode real --label "..." --out r.json`
 y `python -m bench.report r.json > docs/LATENCY.md`. El loadtest usa habla sintética: ejecútalo con `VAD_BACKEND=energy`.
 Contratos con los proveedores: `OPENAI_API_KEY=... GEMINI_API_KEY=... pytest -m contract tests/contract` (cada prueba se omite si falta su clave).

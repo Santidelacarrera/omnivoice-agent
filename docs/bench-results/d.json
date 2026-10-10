@@ -1,0 +1,61 @@
+{
+  "meta": {
+    "timestamp": "2026-10-10T18:32:36Z",
+    "url": "http://127.0.0.1:8011",
+    "duration_s": 20.0,
+    "provider_mode": "simulated",
+    "label": "D. 200 conversaciones simult\u00e1neas, red ideal",
+    "rtt_ms": 0,
+    "jitter_ms": 0,
+    "seed": 1,
+    "server_provider": "cascade"
+  },
+  "clients": 200,
+  "connected": 200,
+  "rejected": 0,
+  "timeouts": 0,
+  "errors": 0,
+  "stages_ms": {
+    "stt": {
+      "count": 2627,
+      "p50": 436.7,
+      "p95": 519.5,
+      "p99": 562.2
+    },
+    "llm": {
+      "count": 2627,
+      "p50": 264.9,
+      "p95": 395.0,
+      "p99": 458.8
+    },
+    "tts": {
+      "count": 2627,
+      "p50": 159.4,
+      "p95": 237.7,
+      "p99": 278.3
+    }
+  },
+  "cost": {
+    "sessions": 200,
+    "minutes": 68.416,
+    "cost_usd": 4.129766,
+    "cost_per_minute_usd": 0.06036,
+    "by_component_usd": {
+      "stt": 0.539411,
+      "llm": 1.379175,
+      "tts": 2.21118
+    }
+  },
+  "first_audio_ms": {
+    "count": 2627,
+    "p50": 864.4,
+    "p95": 1060.6,
+    "p99": 1156.2
+  },
+  "barge_in_roundtrip_ms": {
+    "count": 2627,
+    "p50": 23.5,
+    "p95": 140.9,
+    "p99": 184.4
+  }
+}

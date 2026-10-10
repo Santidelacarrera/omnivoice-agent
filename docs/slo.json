@@ -1,0 +1,12 @@
+{
+  "_comment": "Objetivos de latencia. 'simulated' son límites de la PLATAFORMA derivados de bench/run_matrix.sh (ver docs/LATENCY.md: medición + 25 % de margen). 'real' son PROVISIONALES: se fijan con la primera ejecución con claves reales (regla: p95 medido + 15 %), no antes.",
+  "simulated": {
+    "A": {"first_audio_ms": {"p50": 1050, "p95": 1200}, "barge_in_roundtrip_ms": {"p95": 10}, "errors": 0, "timeouts": 0},
+    "B": {"first_audio_ms": {"p50": 1050, "p95": 1250, "p99": 1350}, "barge_in_roundtrip_ms": {"p95": 15}, "errors": 0, "timeouts": 0},
+    "C": {"first_audio_ms": {"p50": 1300, "p95": 1500}, "barge_in_roundtrip_ms": {"p95": 330}, "errors": 0, "timeouts": 0},
+    "D": {"first_audio_ms": {"p95": 1350}, "errors": 0, "timeouts": 0}
+  },
+  "real": {
+    "default": {"first_audio_ms": {"p50": 1500, "p95": 3000}, "barge_in_roundtrip_ms": {"p95": 300}, "errors": 0}
+  }
+}

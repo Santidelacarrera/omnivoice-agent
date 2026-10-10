@@ -1,5 +1,5 @@
 name: contract
-# Pruebas de contrato contra la API Realtime real de OpenAI. Necesitan el secreto OPENAI_API_KEY (con crédito).
+# Pruebas de contrato contra los servicios reales (OpenAI, Gemini, Deepgram + Anthropic). Cada prueba se omite si falta su clave.
 on:
   workflow_dispatch:
   schedule:
@@ -18,3 +18,5 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -19,6 +19,8 @@ class StateStore(Protocol):
     async def put_session_options(self, key: str, options: dict, ttl: int) -> None: ...
     async def take_session_options(self, key: str) -> dict: ...
     async def acquire_lock(self, name: str, ttl_s: int) -> bool: ...
+    async def add_usage(self, org_id: str, seconds: float) -> None: ...  # consumo del día UTC en curso
+    async def usage_seconds(self, org_id: str) -> float: ...
 
 
 class InMemoryStateStore:
@@ -28,6 +30,18 @@ class InMemoryStateStore:
         self._sessions: dict[str, dict[str, float]] = {}
         self._options: dict[str, tuple[dict, float]] = {}
         self._locks: dict[str, float] = {}
+        self._usage: dict[str, float] = {}
+
+    @staticmethod
+    def _day() -> str:
+        return time.strftime("%Y%m%d", time.gmtime())
+
+    async def add_usage(self, org_id, seconds):
+        k = f"{org_id}:{self._day()}"
+        self._usage[k] = self._usage.get(k, 0.0) + seconds
+
+    async def usage_seconds(self, org_id):
+        return self._usage.get(f"{org_id}:{self._day()}", 0.0)
 
     async def put_session_options(self, key, options, ttl):
         self._options[key] = (options, time.time() + ttl)
@@ -132,3 +146,14 @@ class RedisStateStore:
     async def acquire_lock(self, name, ttl_s):
         # SET NX EX: solo una réplica obtiene el candado por intervalo (jobs periódicos como la retención).
         return bool(await self.r.set(f"lock:{name}", "1", nx=True, ex=ttl_s))
+
+    async def add_usage(self, org_id, seconds):
+        key = f"usage:{org_id}:{time.strftime('%Y%m%d', time.gmtime())}"
+        pipe = self.r.pipeline()
+        pipe.incrbyfloat(key, seconds)
+        pipe.expire(key, 3 * 86400)
+        await pipe.execute()
+
+    async def usage_seconds(self, org_id):
+        raw = await self.r.get(f"usage:{org_id}:{time.strftime('%Y%m%d', time.gmtime())}")
+        return float(raw) if raw else 0.0
