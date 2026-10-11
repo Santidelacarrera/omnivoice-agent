@@ -308,7 +308,7 @@ def create_app(
             from app.realtime.gemini import GeminiLiveProvider
 
             return GeminiLiveProvider(s)
-        if s.active_provider == "cascade" and s.deepgram_api_key and s.anthropic_api_key:
+        if s.active_provider == "cascade" and s.deepgram_api_key and (s.anthropic_api_key or s.brain_url):
             from app.realtime.cascade import build_cascade
 
             return build_cascade(s)

@@ -13,7 +13,7 @@ import structlog
 from app.core.catalog import language_directive
 from app.core.config import Settings
 from app.observability.metrics import (ACTIVE_SESSIONS, COST_WINDOW, ERRORS, PROVIDER_RECONNECTS, RECORDINGS,
-                                       SessionMetrics)
+                                       TURNS, SessionMetrics)
 from app.orchestration.state_machine import InvalidTransition, SessionStateMachine, State
 from app.realtime.provider import RealtimeProvider
 from app.realtime.vad import create_vad
@@ -96,6 +96,7 @@ class VoiceSession:
         self._full_instructions = ""
         self.cost_usd: float | None = None
         self._stages: dict[str, float] = {}
+        self._turn: dict[str, Any] = {}  # registro del turno en curso (solo cifras, nunca texto ni audio)
 
     async def _audit(self, action: str, detail: dict[str, Any] | None = None) -> None:
         d = {"session_id": self.id, "correlation_id": self.correlation_id, **(detail or {})}
@@ -238,6 +239,8 @@ class VoiceSession:
             self._set(State.LISTENING)
             return False
         self.metrics.mark_barge_detected()
+        self._turn["interrupted"] = True
+        await self._flush_turn("interrupted")
         self._epoch += 1
         self._agent_speaking = False
         if self.recorder:
@@ -282,6 +285,7 @@ class VoiceSession:
             ttfb = None if self.vad.last_voiced else self.metrics.mark_audio_out()  # no cuenta si el usuario sigue hablando
             if ttfb is not None:
                 self.first_audio_ms = round(ttfb * 1000)
+                self._turn.update(first_audio_ms=self.first_audio_ms, stages=dict(self._stages))
                 await self.send({"type": "metrics", "first_audio_ms": self.first_audio_ms, **self._stages})
                 self._stages = {}
             self._audio_out_bytes += len(ev["audio"])
@@ -298,6 +302,7 @@ class VoiceSession:
             self._spawn(self._run_tool(ev, self._epoch))
         elif t == "response_done":
             self._agent_speaking = False
+            await self._flush_turn("completed")
             if self.sm.state in (State.RESPONDING, State.PROCESSING):
                 self._set(State.LISTENING)
             await self.send({"type": "state", "state": self.sm.state.value})
@@ -314,6 +319,16 @@ class VoiceSession:
             ERRORS.labels("provider_event").inc()
             log.warning("provider_error_event", session=self.id, message=str(ev.get("message"))[:300])
             await self.send({"type": "error", "message": ev["message"]})
+
+    async def _flush_turn(self, outcome: str) -> None:
+        """Cierra el registro del turno: latencia total y por etapa, herramientas e interrupción. Sin contenido."""
+        turn, self._turn = self._turn, {}
+        if not turn:
+            return
+        turn["outcome"] = outcome
+        TURNS.labels(outcome).inc()
+        if self.conversation_id:
+            await self.db.add_event(self.principal.org_id, self.conversation_id, "turn", turn, self.correlation_id)
 
     async def _provider_failure(self, where: str, exc: Exception | None) -> None:
         """Registra el motivo real (visible en los logs) y, si hay fábrica y presupuesto de reintentos, reconecta;
@@ -402,6 +417,7 @@ class VoiceSession:
 
     async def _run_tool(self, ev: dict[str, Any], epoch: int) -> None:
         self._set(State.TOOL_RUNNING)
+        self._turn["tools"] = self._turn.get("tools", 0) + 1
         await self.send({"type": "tool.start", "name": ev["name"]})
         started = time.monotonic()
         result = await self.registry.execute(

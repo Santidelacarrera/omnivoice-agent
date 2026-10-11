@@ -183,10 +183,11 @@ class CascadedProvider:
 
     async def _llm_round(self, pending: list[dict[str, Any]], spoken: list[str], t_final: float) -> list[dict[str, Any]]:
         """Una pasada del LLM: sus frases se sintetizan en paralelo a la generación. Devuelve las herramientas pedidas."""
-        sentences: asyncio.Queue[str | None] = asyncio.Queue()
+        sentences: asyncio.Queue[tuple[str, float, bool] | None] = asyncio.Queue()  # (texto, instante, es_muletilla)
         tool_uses: list[dict[str, Any]] = []
         text_parts: list[str] = []
         first_sentence_at: list[float] = []
+        produced = asyncio.Event()  # el cerebro terminó de emitir (o falló)
 
         async def produce() -> None:
             buf = ""
@@ -202,7 +203,7 @@ class CascadedProvider:
                                 first_sentence_at.append(time.monotonic())
                                 await self._q.put({"type": "stage", "stage": "llm",
                                                    "ms": round((first_sentence_at[0] - t_final) * 1000, 1)})
-                            await sentences.put(sent)
+                            await sentences.put((sent, time.monotonic(), False))
                     elif ev["type"] == "tool_use":
                         tool_uses.append(ev)
                     elif ev["type"] == "usage":
@@ -214,20 +215,31 @@ class CascadedProvider:
                         first_sentence_at.append(time.monotonic())
                         await self._q.put({"type": "stage", "stage": "llm",
                                            "ms": round((first_sentence_at[0] - t_final) * 1000, 1)})
-                    await sentences.put(sent)
+                    await sentences.put((sent, time.monotonic(), False))
             finally:
+                produced.set()
                 await sentences.put(None)
+
+        async def filler() -> None:
+            """Si el cerebro (p. ej. un consenso multiagente) tarda, se habla una muletilla en vez de dejar silencio.
+            No cuenta como etapa LLM ni entra en el historial: la latencia real del cerebro sigue medida."""
+            try:
+                await asyncio.wait_for(produced.wait(), self.s.filler_after_ms / 1000)
+            except asyncio.TimeoutError:
+                if not first_sentence_at:
+                    await sentences.put((self.s.filler_text, time.monotonic(), True))
 
         async def speak() -> None:
             first_audio_sent = False
             carry = b""
-            while (sent := await sentences.get()) is not None:
+            while (item := await sentences.get()) is not None:
+                sent, enq_at, is_filler = item
                 self.usage["tts_chars"] += len(sent)
                 async for chunk in self.tts.synth(sent, self._voice, self._language):
                     if not first_audio_sent:
                         first_audio_sent = True
                         await self._q.put({"type": "stage", "stage": "tts",
-                                           "ms": round((time.monotonic() - first_sentence_at[0]) * 1000, 1)})
+                                           "ms": round((time.monotonic() - enq_at) * 1000, 1)})
                     data = carry + chunk
                     cut = len(data) - len(data) % FRAME_BYTES
                     carry = data[cut:]
@@ -236,11 +248,14 @@ class CascadedProvider:
                 if carry:  # resto de la frase: se completa a un frame con silencio para no perder la cola
                     await self._q.put({"type": "audio_delta", "audio": carry.ljust(FRAME_BYTES, b"\x00")})
                     carry = b""
-                spoken.append(sent)
+                if not is_filler:
+                    spoken.append(sent)
 
         async with asyncio.TaskGroup() as tg:  # si una falla o se cancela, la otra se cancela con ella
             tg.create_task(produce())
             tg.create_task(speak())
+            if self.s.filler_after_ms > 0 and self.s.filler_text:
+                tg.create_task(filler())
 
         text = "".join(text_parts).strip()
         blocks: list[dict[str, Any]] = ([{"type": "text", "text": text}] if text else []) + [
@@ -440,5 +455,41 @@ class AnthropicLLM:
         await self.http.aclose()
 
 
+
+
+class ConsensusBrainLLM:
+    """Cliente del orquestador de consenso multiagente (`MultiAgent_Consensus`) como `LLMClient`.
+
+    Contrato PROPUESTO (el orquestador debe exponerlo; ver docs/VOICE_ARCHITECTURE.md §4): POST `brain_url` con
+    {"session_id"?, "system", "messages", "tools", "max_tokens"} y respuesta NDJSON en streaming, una línea por evento:
+      {"type":"text","text":"..."}                       fragmento de la respuesta final (ya acordada)
+      {"type":"tool_use","id","name","input"}            herramienta a ejecutar por NUESTRO registro
+      {"type":"usage","in":N,"out":M}                    consumo agregado de los agentes
+      {"type":"progress","stage":"..."}                  opcional: ignorado aquí, útil para trazas
+    El consenso solo debe emitir `text` cuando la respuesta está decidida; las deliberaciones internas no se hablan."""
+
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+        self.s = settings
+        self.http = client or httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=60.0))
+
+    async def stream(self, system: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                     max_tokens: int) -> AsyncIterator[dict[str, Any]]:
+        headers = {"Authorization": f"Bearer {self.s.brain_api_key}"} if self.s.brain_api_key else {}
+        body = {"system": system, "messages": messages, "tools": tools, "max_tokens": max_tokens}
+        async with self.http.stream("POST", self.s.brain_url, json=body, headers=headers) as r:
+            r.raise_for_status()
+            async for line in r.aiter_lines():
+                if not line.strip():
+                    continue
+                ev = json.loads(line)
+                if ev.get("type") in ("text", "tool_use", "usage"):
+                    yield ev
+
+    async def close(self) -> None:
+        await self.http.aclose()
+
+
 def build_cascade(settings: Settings) -> CascadedProvider:
-    return CascadedProvider(settings, DeepgramSTT(settings), AnthropicLLM(settings), DeepgramTTS(settings))
+    """STT + cerebro + TTS. Con `BRAIN_URL` el cerebro es el orquestador de consenso; si no, el LLM directo."""
+    brain = ConsensusBrainLLM(settings) if settings.brain_url else AnthropicLLM(settings)
+    return CascadedProvider(settings, DeepgramSTT(settings), brain, DeepgramTTS(settings))

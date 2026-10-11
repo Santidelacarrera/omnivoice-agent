@@ -301,4 +301,4 @@ Conviene saber qué está verificado y qué no:
 
 ---
 
-Documentación: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+Documentación: [`docs/VOICE_ARCHITECTURE.md`](docs/VOICE_ARCHITECTURE.md) · [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/RUNBOOK.md`](docs/RUNBOOK.md)

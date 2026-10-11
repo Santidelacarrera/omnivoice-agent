@@ -358,3 +358,23 @@ async def test_cascade_cost_uses_per_service_usage_and_survives_reconnect():
     comps = s._cost_components()
     assert comps["llm"] == pytest.approx(1.0 + 1.0) and comps["tts"] == pytest.approx(0.06) and comps["stt"] == pytest.approx(0.02)
     await s.close()
+
+
+async def test_per_turn_quality_record_has_numbers_and_no_content():
+    db = InMemoryPersistence()
+    prov = FakeProvider(script=[{"type": "transcript_user", "text": "TEXTO-PRIVADO"},
+                                {"type": "tool_call", "call_id": "c1", "name": "check_reservation",
+                                 "arguments": json.dumps({"reservation_id": "X"})}], audio_chunks=3, chunk_delay=0.001)
+    s, _, _ = make(provider=prov, db=db)
+    await s.start()
+    for _ in range(10):
+        await s.on_audio(LOUD)
+    await s.on_audio(QUIET)
+    prov.trigger_response()
+    await asyncio.sleep(0.2)
+    await s.close()
+    conv = (await db.list_conversations("o1", 5))[0]
+    turns = [e["payload"] for e in db.events[conv["id"]] if e["type"] == "turn"]
+    assert len(turns) == 1 and turns[0]["outcome"] == "completed" and turns[0]["tools"] == 1
+    assert turns[0]["first_audio_ms"] >= 0
+    assert "TEXTO-PRIVADO" not in json.dumps(db.events[conv["id"]]) .replace("transcript", "")  # solo cifras en los turnos

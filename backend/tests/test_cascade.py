@@ -291,3 +291,53 @@ async def test_deepgram_stt_joins_fragments_and_reconnects_after_drop():
         await asyncio.wait_for(run(), 3)
         assert got == ["quiero una mesa", "para dos"] and connections == 2
         await stt.close()
+
+
+# ---- cerebro externo (consenso multiagente) y muletilla ----
+
+async def test_consensus_brain_client_streams_ndjson_and_ignores_progress():
+    from app.realtime.cascade import ConsensusBrainLLM
+
+    body = "\n".join(json.dumps(e) for e in [
+        {"type": "progress", "stage": "debate"}, {"type": "text", "text": "Acordado."},
+        {"type": "tool_use", "id": "b1", "name": "x", "input": {}}, {"type": "usage", "in": 900, "out": 40}]) + "\n"
+    seen = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        seen["auth"], seen["body"] = req.headers.get("authorization"), json.loads(req.content)
+        return httpx.Response(200, content=body)
+
+    s = Settings(environment="test", brain_url="http://brain/converse", brain_api_key="k")
+    brain = ConsensusBrainLLM(s, httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    evs = [e async for e in brain.stream("sys", [{"role": "user", "content": "hola"}], [], 100)]
+    assert [e["type"] for e in evs] == ["text", "tool_use", "usage"]
+    assert seen["auth"] == "Bearer k" and seen["body"]["messages"][0]["content"] == "hola"
+
+
+async def test_filler_is_spoken_when_brain_is_slow_but_not_counted_as_llm_nor_history():
+    s = Settings(environment="test", filler_after_ms=50, filler_text="Un momento.")
+    stt, tts = FakeSTT(), FakeTTS()
+    llm = FakeLLM([[0.3, text("Respuesta final.")]])
+    p = CascadedProvider(s, stt, llm, tts)
+    await p.connect("sys", [])
+    await stt.q.put("pregunta difícil")
+    evs = await collect(p, lambda e: e["type"] == "response_done")
+    assert tts.texts == ["Un momento.", "Respuesta final."]
+    llm_stage = next(e for e in evs if e["type"] == "stage" and e["stage"] == "llm")
+    assert llm_stage["ms"] >= 250  # la latencia real del cerebro no se disfraza
+    first_audio_idx = next(i for i, e in enumerate(evs) if e["type"] == "audio_delta")
+    assert first_audio_idx < evs.index(llm_stage)  # hay voz antes de que el cerebro responda
+    assert p._history[-1]["content"] == [{"type": "text", "text": "Respuesta final."}]  # sin la muletilla
+    await p.close()
+
+
+async def test_no_filler_when_brain_answers_in_time():
+    s = Settings(environment="test", filler_after_ms=500, filler_text="Un momento.")
+    stt, tts = FakeSTT(), FakeTTS()
+    p = CascadedProvider(s, stt, FakeLLM([[text("Rápido.")]]), tts)
+    await p.connect("sys", [])
+    await stt.q.put("hola")
+    t0 = asyncio.get_running_loop().time()
+    await collect(p, lambda e: e["type"] == "response_done")
+    assert tts.texts == ["Rápido."] and asyncio.get_running_loop().time() - t0 < 0.4  # el temporizador no retrasa el turno
+    await p.close()

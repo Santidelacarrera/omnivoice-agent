@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     cascade_history_messages: int = 20  # tope de mensajes de contexto enviados al LLM (coste y latencia acotados)
     cascade_max_tool_rounds: int = 4
     cascade_turn_timeout_s: float = 30.0
+    # Cerebro externo (orquestador de consenso multiagente) en lugar del LLM directo. Vacío = LLM directo (Anthropic).
+    brain_url: str = ""  # contrato en docs/VOICE_ARCHITECTURE.md §4
+    brain_api_key: str = ""
+    # Si el cerebro tarda más de esto en dar la primera frase, se habla una muletilla (0 = desactivado).
+    filler_after_ms: int = 0
+    filler_text: str = "Un momento, lo compruebo."
 
     # Fallos de proveedor: conexión con plazo, reconexión acotada por sesión y tope global de sesiones.
     provider_connect_timeout_s: float = 10.0
@@ -123,7 +129,8 @@ class Settings(BaseSettings):
             return "gemini"
         if self.openai_api_key:
             return "openai"
-        return "cascade" if self.deepgram_api_key and self.anthropic_api_key else "simulated"
+        has_brain = bool(self.anthropic_api_key or self.brain_url)
+        return "cascade" if self.deepgram_api_key and has_brain else "simulated"
 
     @property
     def available_voices(self) -> list[str]:

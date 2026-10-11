@@ -20,6 +20,7 @@ STAGE_LATENCY = Histogram(
     ["stage"],
     buckets=(0.05, 0.1, 0.2, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 5),
 )
+TURNS = Counter("omnivoice_turns_total", "Turnos del agente por desenlace", ["outcome"])
 PROVIDER_RECONNECTS = Counter("omnivoice_provider_reconnects_total", "Reconexiones al proveedor de voz", ["outcome"])
 CONVERSATION_SECONDS = Counter("omnivoice_conversation_seconds_total", "Segundos de conversación facturables")
 CONVERSATION_COST = Counter("omnivoice_conversation_cost_usd_total", "Coste estimado de proveedores (USD)", ["component"])
