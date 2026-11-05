@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 import struct
+import time
 
 import pytest
 import structlog
@@ -250,7 +251,12 @@ def test_usage_is_charged_on_close_and_quota_is_released_after_abrupt_disconnect
     with c.websocket_connect(conn["ws_path"]) as ws:
         ws.receive_json()
         ws.send_bytes(struct.pack(">I", 0) + LOUD)
-    # salida del `with` = desconexión sin mensaje "end"
+        time.sleep(0.05)  # el reloj monotónico de Windows tiene ~15 ms de resolución
+    # salida del `with` = desconexión sin mensaje "end"; el cierre del servidor es asíncrono, así que se espera
+    for _ in range(100):
+        if asyncio.run(c.app.state.store.active_sessions("o1")) == 0 and asyncio.run(c.app.state.store.usage_seconds("o1")) > 0:
+            break
+        time.sleep(0.05)
     assert asyncio.run(c.app.state.store.active_sessions("o1")) == 0
     assert asyncio.run(c.app.state.store.usage_seconds("o1")) > 0
 

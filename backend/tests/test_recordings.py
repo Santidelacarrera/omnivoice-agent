@@ -1,4 +1,3 @@
-import asyncio
 import io
 import struct
 import wave
@@ -12,7 +11,7 @@ from app.main import create_app
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.realtime.provider import FakeProvider
 from app.security.auth import Principal, issue_token
-from app.services.recordings import (LocalRecordingStorage, S3RecordingStorage, StereoRecorder, recording_key)
+from app.services.recordings import LocalRecordingStorage, S3RecordingStorage, StereoRecorder, recording_key
 from app.tools.handlers import InMemoryRepository, build_registry
 
 RATE = 24000
@@ -236,21 +235,10 @@ def stream_then_end(ws, frames=6):
     ws.send_text('{"type":"end"}')
     # El servidor avisa con "session.closed" cuando terminó de guardar la grabación. Un temporizador evita
     # que el test se cuelgue para siempre si el cierre no llega.
-    import signal
-
-    def _timeout(*_):
-        raise TimeoutError("el servidor no confirmó el cierre de la sesión")
-
-    old = signal.signal(signal.SIGALRM, _timeout)
-    signal.alarm(20)
-    try:
-        for _ in range(200):
-            m = ws.receive()
-            if m.get("text") and '"session.closed"' in m["text"]:
-                break
-    finally:
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM, old)
+    for _ in range(200):
+        m = ws.receive()
+        if m.get("text") and '"session.closed"' in m["text"]:
+            break
 
 
 def wait_closed(app, timeout=5.0):

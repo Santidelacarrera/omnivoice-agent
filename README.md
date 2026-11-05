@@ -301,4 +301,16 @@ Conviene saber qué está verificado y qué no:
 
 ---
 
-Documentación: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) · [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+## Despliegue en producción
+
+```bash
+export JWT_SECRET=$(openssl rand -hex 32) POSTGRES_PASSWORD=... GRAFANA_ADMIN_PASSWORD=...   DATABASE_URL='postgresql+asyncpg://omni_app:<clave>@postgres:5432/omnivoice'   CORS_ORIGINS='["https://app.ejemplo.com"]' PUBLIC_API_URL=https://api.ejemplo.com
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# tras la primera migración, cambia la clave del rol de aplicación:
+docker compose exec postgres psql -U omni -d omnivoice -c "ALTER ROLE omni_app PASSWORD '<clave>'"
+```
+
+El overlay `docker-compose.prod.yml` exige los secretos (falla si faltan), no publica PostgreSQL, Redis ni Prometheus,
+ejecuta el backend de solo lectura y sin capacidades, y el frontend usa una imagen `standalone` multi-etapa sin root.
+Pon un proxy TLS delante (el micrófono del navegador exige HTTPS). Tests y lint: `pip install -r requirements-dev.txt &&
+ruff check . && pytest -q`. El CI ejecuta además `pip-audit`, `npm audit` y la construcción de las imágenes.

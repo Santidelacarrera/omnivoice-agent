@@ -8,8 +8,7 @@ import pytest
 import websockets
 
 from app.core.config import Settings
-from app.realtime.cascade import (AnthropicLLM, CascadedProvider, DeepgramSTT, DeepgramTTS, FRAME_BYTES,
-                                  split_sentences)
+from app.realtime.cascade import FRAME_BYTES, AnthropicLLM, CascadedProvider, DeepgramSTT, DeepgramTTS, split_sentences
 
 S = Settings(environment="test", deepgram_api_key="dg-test-key", anthropic_api_key="an-test-key",
              provider_reconnect_backoff_s=0.01)

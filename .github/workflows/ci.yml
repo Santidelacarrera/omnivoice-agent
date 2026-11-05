@@ -12,8 +12,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
-        with: { python-version: "3.12", cache: pip, cache-dependency-path: backend/requirements.txt }
-      - run: pip install -r requirements.txt
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: backend/requirements-dev.txt }
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: pip-audit -r requirements.txt
       - name: pytest
         shell: bash
         run: |
@@ -57,7 +59,18 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
         with: { node-version: "22" }
-      - run: npm install
+      - run: npm ci
+      - run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npm run build
         env: { NEXT_PUBLIC_API_URL: http://localhost:8000 }
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Construir imágenes de producción
+        run: |
+          docker build -t omnivoice-backend backend
+          docker build -t omnivoice-frontend --build-arg NEXT_PUBLIC_API_URL=http://localhost:8000 frontend
+      - name: Validar overlay de producción
+        run: JWT_SECRET=x POSTGRES_PASSWORD=x DATABASE_URL=x CORS_ORIGINS='["https://a"]' PUBLIC_API_URL=https://a GRAFANA_ADMIN_PASSWORD=x docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q

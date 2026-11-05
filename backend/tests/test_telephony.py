@@ -1,12 +1,11 @@
 """Telefonía: códec μ-law, firma de Twilio, webhook, Media Streams y transferencia a humano."""
 import array
-import asyncio
 import base64
 import json
 import math
+from urllib.parse import urlencode
 
 import pytest
-from urllib.parse import urlencode
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings

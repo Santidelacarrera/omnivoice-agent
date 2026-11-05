@@ -12,8 +12,14 @@ import structlog
 
 from app.core.catalog import language_directive
 from app.core.config import Settings
-from app.observability.metrics import (ACTIVE_SESSIONS, COST_WINDOW, ERRORS, PROVIDER_RECONNECTS, RECORDINGS,
-                                       SessionMetrics)
+from app.observability.metrics import (
+    ACTIVE_SESSIONS,
+    COST_WINDOW,
+    ERRORS,
+    PROVIDER_RECONNECTS,
+    RECORDINGS,
+    SessionMetrics,
+)
 from app.orchestration.state_machine import InvalidTransition, SessionStateMachine, State
 from app.realtime.provider import RealtimeProvider
 from app.realtime.vad import create_vad
@@ -23,6 +29,8 @@ from app.services.recordings import StereoRecorder, recording_key
 from app.tools.registry import ToolRegistry
 
 log = structlog.get_logger()
+
+STALE_AUDIO_MAX_S = 1.5  # salvaguarda: máximo que se descarta audio obsoleto tras un barge-in
 
 Send = Callable[[dict[str, Any] | bytes], Awaitable[None]]
 
@@ -83,6 +91,7 @@ class VoiceSession:
         self._tasks: set[asyncio.Task] = set()
         self._epoch = 0  # se incrementa en cada interrupción: descarta audio y resultados obsoletos
         self._agent_speaking = False
+        self._discard_until = 0.0  # audio del proveedor anterior al barge-in que aún puede llegar
         self._closed = False
         self._provider_failed = False
         self._counted = False  # ACTIVE_SESSIONS solo se decrementa si se incrementó
@@ -240,6 +249,7 @@ class VoiceSession:
         self.metrics.mark_barge_detected()
         self._epoch += 1
         self._agent_speaking = False
+        self._discard_until = time.monotonic() + STALE_AUDIO_MAX_S
         if self.recorder:
             self.recorder.drop_pending_agent_audio()  # lo que no llegó a sonar no se graba
         self._set(State.INTERRUPTED)
@@ -274,8 +284,8 @@ class VoiceSession:
     async def _on_provider_event(self, ev: dict[str, Any]) -> None:
         t = ev["type"]
         if t == "audio_delta":
-            if self.sm.state == State.INTERRUPTED:
-                return  # audio obsoleto tras interrupción
+            if self.sm.state == State.INTERRUPTED or time.monotonic() < self._discard_until:
+                return  # audio obsoleto tras interrupción (ya en vuelo cuando se canceló)
             if self.sm.state != State.RESPONDING:
                 self._set(State.RESPONDING)
             self._agent_speaking = True
@@ -297,6 +307,7 @@ class VoiceSession:
         elif t == "tool_call":
             self._spawn(self._run_tool(ev, self._epoch))
         elif t == "response_done":
+            self._discard_until = 0.0  # la respuesta cancelada terminó: lo que llegue es nuevo
             self._agent_speaking = False
             if self.sm.state in (State.RESPONDING, State.PROCESSING):
                 self._set(State.LISTENING)

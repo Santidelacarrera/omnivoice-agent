@@ -135,6 +135,7 @@ class FakeProvider:
         self.cancelled += 1
         if self._task and not self._task.done():
             self._task.cancel()
+            await self._q.put({"type": "response_done"})  # como un proveedor real, la respuesta cancelada se cierra
 
     async def events(self) -> AsyncIterator[dict[str, Any]]:
         while True:

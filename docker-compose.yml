@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: omni          # superusuario solo para migraciones; la app usa omni_app
       POSTGRES_PASSWORD: omni
@@ -15,6 +16,7 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: ["redis-server", "--save", "", "--appendonly", "no"]   # solo estado efímero
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -23,6 +25,7 @@ services:
 
   backend:
     build: ./backend
+    restart: unless-stopped
     env_file: .env
     environment:
       # permite el frontend en el puerto publicado (y el 3000 por defecto)
@@ -37,20 +40,25 @@ services:
       retries: 6
 
   frontend:
-    build: ./frontend
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:${BACKEND_PORT:-8010}
+    restart: unless-stopped
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:${BACKEND_PORT:-8010}}   # se incrusta al compilar
     ports: ["${FRONTEND_PORT:-4310}:3000"]   # puerto en tu máquina
     depends_on: [backend]
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v2.55.1
     volumes:
       - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports: ["9090:9090"]
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.3.1
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}   # cámbiala en producción
+      GF_USERS_ALLOW_SIGN_UP: "false"
     ports: ["3001:3000"]
     depends_on: [prometheus]
 

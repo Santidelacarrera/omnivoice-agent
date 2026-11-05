@@ -15,8 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.catalog import LANGUAGE_NAMES
 from app.core.config import Settings, get_settings
-from app.observability.metrics import (BARGE_WINDOW, BUDGET_REJECTED, COST_WINDOW, ERRORS, STAGE_WINDOWS,
-                                       TTFB_WINDOW)
+from app.observability.metrics import BARGE_WINDOW, BUDGET_REJECTED, COST_WINDOW, ERRORS, STAGE_WINDOWS, TTFB_WINDOW
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.realtime.provider import FakeProvider, OpenAIRealtimeProvider, RealtimeProvider
 from app.security.auth import Principal, issue_token, require
@@ -79,7 +78,6 @@ def create_app(
         redis_client = None
         if persistence is None and s.persistence_backend == "postgres":
             from app.database.engine import init_engine
-
             from app.services.pg_persistence import PostgresPersistence
 
             init_engine(s.database_url)

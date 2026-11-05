@@ -3,8 +3,6 @@ en memoria en tests). Siempre filtran por org_id del principal (aislamiento mult
 import uuid
 from typing import Any, Protocol
 
-from pydantic import BaseModel
-
 from app.security.auth import Principal
 from app.tools.registry import (
     CheckInventoryArgs,

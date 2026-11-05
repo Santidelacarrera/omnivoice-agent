@@ -2,8 +2,6 @@
 import base64
 import json
 
-import pytest
-
 from app.core.config import Settings
 from app.realtime.gemini import GeminiLiveProvider, to_function_declarations, to_gemini_schema
 
