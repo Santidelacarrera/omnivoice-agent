@@ -73,4 +73,4 @@ jobs:
           docker build -t omnivoice-backend backend
           docker build -t omnivoice-frontend --build-arg NEXT_PUBLIC_API_URL=http://localhost:8000 frontend
       - name: Validar overlay de producción
-        run: JWT_SECRET=x POSTGRES_PASSWORD=x OMNI_APP_PASSWORD=x APP_DOMAIN=a.test API_DOMAIN=b.test CORS_ORIGINS='["https://a"]' PUBLIC_API_URL=https://a GRAFANA_ADMIN_PASSWORD=x docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
+        run: cp .env.example .env && JWT_SECRET=x POSTGRES_PASSWORD=x OMNI_APP_PASSWORD=x APP_DOMAIN=a.test API_DOMAIN=b.test CORS_ORIGINS='["https://a"]' PUBLIC_API_URL=https://a GRAFANA_ADMIN_PASSWORD=x docker compose -f docker-compose.yml -f docker-compose.prod.yml config -q
