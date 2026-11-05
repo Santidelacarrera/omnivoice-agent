@@ -52,6 +52,7 @@ services:
     image: prom/prometheus:v2.55.1
     volumes:
       - ./infrastructure/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/alerts.yml:/etc/prometheus/alerts.yml:ro
     ports: ["9090:9090"]
 
   grafana:

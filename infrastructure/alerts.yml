@@ -1,0 +1,38 @@
+groups:
+  - name: omnivoice
+    rules:
+      - alert: BackendCaido
+        expr: up{job="omnivoice-backend"} == 0
+        for: 1m
+        labels: { severity: critical }
+        annotations: { summary: "El backend no responde", runbook: "docs/RUNBOOK.md#incidentes" }
+      - alert: LatenciaPrimerAudioAlta
+        expr: histogram_quantile(0.5, sum(rate(omnivoice_first_audio_seconds_bucket[5m])) by (le)) > 0.5
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "p50 al primer audio > 0.5 s" }
+      - alert: SilencioTrasInterrupcionAlto
+        expr: histogram_quantile(0.95, sum(rate(omnivoice_barge_in_seconds_bucket[5m])) by (le)) > 0.2
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "p95 de silencio tras barge-in > 200 ms" }
+      - alert: ErroresAltos
+        expr: sum(rate(omnivoice_errors_total[5m])) > 1
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Más de 1 error/s sostenido" }
+      - alert: FalloDePersistencia
+        expr: rate(omnivoice_errors_total{kind="persistence"}[5m]) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Fallos al guardar en la base de datos" }
+      - alert: ProveedorDeVozFallando
+        expr: rate(omnivoice_provider_reconnects_total{outcome="failed"}[5m]) > 0
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Reconexiones fallidas al proveedor de voz (clave, cuota o caída)" }
+      - alert: SesionesRechazadasPorTope
+        expr: sum(rate(omnivoice_budget_rejected_total[10m])) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "Se rechazan sesiones por tope de concurrencia o presupuesto diario" }

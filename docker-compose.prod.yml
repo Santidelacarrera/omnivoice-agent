@@ -39,6 +39,32 @@ services:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?define GRAFANA_ADMIN_PASSWORD}
     ports: !override ["127.0.0.1:3001:3000"]
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      PGHOST: postgres
+      PGUSER: omni
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: omnivoice
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - backups:/backups
+    # Copia diaria con comprobación de integridad y rotación. Restauración: scripts/restore.sh
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while true; do
+          f=/backups/omnivoice-$$(date +%Y%m%d-%H%M%S).sql.gz
+          if pg_dump | gzip > $$f && gzip -t $$f && [ -s $$f ]; then echo "backup ok $$f"; else echo "backup FALLO" >&2; fi
+          find /backups -name 'omnivoice-*.sql.gz' -mtime +$$BACKUP_KEEP_DAYS -delete
+          sleep 86400
+        done
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
   caddy:
     image: caddy:2.8-alpine
     restart: unless-stopped
@@ -56,3 +82,4 @@ services:
 
 volumes:
   caddy_data:
+  backups:
