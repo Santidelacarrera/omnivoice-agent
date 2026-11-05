@@ -1,0 +1,18 @@
+# TLS automático (Let's Encrypt). Solo Caddy publica puertos; /metrics y /docs no salen a Internet.
+{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy frontend:3000
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+	@internal path /metrics /metrics/* /docs /docs/* /openapi.json
+	respond @internal 404
+	# WebSocket de audio: el backend cierra por inactividad a los 60 s, sin timeouts intermedios.
+	reverse_proxy backend:8000 {
+		flush_interval -1
+		transport http {
+			read_timeout 120s
+		}
+	}
+}

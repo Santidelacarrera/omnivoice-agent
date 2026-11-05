@@ -1,7 +1,7 @@
 # Runbook
 
 ## Despliegue
-1. Aplicar `migrations/001..003` con un usuario administrador de BD. En producción **cambia la contraseña de `omni_app`**
+1. Con el overlay de producción las migraciones y la clave de `omni_app` se aplican solas (ver README). Manual: aplica `migrations/*.sql` con un administrador y cambia la clave de `omni_app`.
    en `002_app_role.sql` (o créala fuera del script) y **no apliques el seed `003`** (datos demo).
 2. Variables obligatorias en producción: `ENVIRONMENT=production`, `PERSISTENCE_BACKEND=postgres`,
    `STATE_BACKEND=redis`, `JWT_SECRET` (≥ 32 caracteres), `CORS_ORIGINS` explícito, `OPENAI_API_KEY`.

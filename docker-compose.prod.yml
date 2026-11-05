@@ -4,15 +4,17 @@ services:
   postgres:
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD}
+      OMNI_APP_PASSWORD: ${OMNI_APP_PASSWORD:?define OMNI_APP_PASSWORD (hex, p. ej. openssl rand -hex 24)}
     ports: !reset []
   redis:
     ports: !reset []
   backend:
+    ports: !reset []
     environment:
       ENVIRONMENT: production
       PERSISTENCE_BACKEND: postgres
       STATE_BACKEND: redis
-      DATABASE_URL: ${DATABASE_URL:?define DATABASE_URL con una contraseña propia para omni_app}
+      DATABASE_URL: postgresql+asyncpg://omni_app:${OMNI_APP_PASSWORD}@postgres:5432/omnivoice
       JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET (>=32 caracteres)}
       CORS_ORIGINS: ${CORS_ORIGINS:?define CORS_ORIGINS, p. ej. ["https://app.ejemplo.com"]}
     read_only: true
@@ -23,6 +25,7 @@ services:
       resources:
         limits: { cpus: "2.0", memory: 1g }
   frontend:
+    ports: !reset []
     build:
       args:
         NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:?define PUBLIC_API_URL (URL pública del backend)}
@@ -35,4 +38,21 @@ services:
   grafana:
     environment:
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?define GRAFANA_ADMIN_PASSWORD}
-    ports: ["127.0.0.1:3001:3000"]
+    ports: !override ["127.0.0.1:3001:3000"]
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?define APP_DOMAIN, p. ej. app.ejemplo.com}
+      API_DOMAIN: ${API_DOMAIN:?define API_DOMAIN, p. ej. api.ejemplo.com}
+    volumes:
+      - ./infrastructure/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    ports: ["80:80", "443:443"]
+    depends_on: [backend, frontend]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+
+volumes:
+  caddy_data:
