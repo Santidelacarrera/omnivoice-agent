@@ -135,6 +135,12 @@ def create_app(
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Permissions-Policy"] = "microphone=(), camera=(), geolocation=()"
+        if not request.url.path.startswith("/docs"):
+            response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+        if s.environment == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
         return response
 
     def authed(permission: str):
@@ -320,6 +326,11 @@ def create_app(
 
     @app.websocket("/ws/audio")
     async def ws_audio(ws: WebSocket, ticket: str = ""):
+        # Defensa en profundidad contra WebSocket entre sitios: si el navegador envía Origin, debe ser uno permitido.
+        origin = ws.headers.get("origin")
+        if origin and s.environment != "development" and "*" not in s.cors_origins and origin not in s.cors_origins:
+            await ws.close(code=WS_CLOSE_UNAUTHORIZED)
+            return
         entry = await app.state.store.take_ticket(ticket)
         if not entry:
             await ws.close(code=WS_CLOSE_UNAUTHORIZED)

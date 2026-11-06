@@ -142,3 +142,36 @@ def test_metrics_endpoint_reports_percentiles_shape():
     c = make_client()
     m = c.get("/api/v1/metrics", headers=auth("operator")).json()
     assert set(m["first_audio_ms"]) == {"count", "p50", "p95", "p99"}
+
+
+def test_security_headers_present():
+    r = make_client().get("/healthz")
+    assert r.headers["X-Frame-Options"] == "DENY"
+    assert "frame-ancestors 'none'" in r.headers["Content-Security-Policy"]
+
+
+def test_token_with_missing_or_unknown_claims_is_401_not_500():
+    import time
+
+    import jwt as pyjwt
+
+    c = make_client()
+    from app.core.config import get_settings
+
+    secret = get_settings().jwt_secret
+    now = int(time.time())
+    for payload in ({"sub": "u", "org": "o1", "exp": now + 60},                       # sin role
+                    {"sub": "u", "org": "o1", "role": "root", "exp": now + 60},      # rol desconocido
+                    {"sub": "u", "org": "o1", "role": "admin"}):                      # sin exp
+        tok = pyjwt.encode(payload, secret, algorithm="HS256")
+        assert c.post("/api/v1/sessions", headers={"Authorization": f"Bearer {tok}"}).status_code == 401
+
+
+def test_ws_rejects_foreign_origin():
+    c = make_client(cors_origins=["https://app.ejemplo.com"])
+    h = auth()
+    _, conn = open_ws(c, h)
+    with pytest.raises(WebSocketDisconnect) as e:
+        with c.websocket_connect(conn["ws_path"], headers={"origin": "https://evil.example"}):
+            pass
+    assert e.value.code == 4401

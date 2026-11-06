@@ -38,9 +38,12 @@ def issue_token(user_id: str, org_id: str, role: str, ttl: int | None = None) ->
 def decode_token(token: str) -> Principal:
     s = get_settings()
     try:
-        data = jwt.decode(token, s.jwt_secret, algorithms=[s.jwt_algorithm])
+        data = jwt.decode(token, s.jwt_secret, algorithms=[s.jwt_algorithm],
+                          options={"require": ["exp", "sub", "org", "role"]})
     except jwt.PyJWTError as exc:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido o expirado") from exc
+    if not all(isinstance(data.get(k), str) and data[k] for k in ("sub", "org", "role")) or data["role"] not in ROLE_PERMISSIONS:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token inválido o expirado")
     if s.persistence_backend == "postgres":
         try:
             uuid.UUID(str(data["org"]))  # RLS compara contra uuid: rechazamos antes de llegar a la BD
