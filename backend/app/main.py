@@ -33,6 +33,15 @@ WS_CLOSE_TIMEOUT = 4408
 IDLE_TIMEOUT_S = 60
 
 
+def _valid_id(value: str) -> str:
+    """Las conversaciones son UUID; un id mal formado es un 404, no un error de base de datos."""
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(404, "No encontrado") from None
+    return value
+
+
 class CreateSessionBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     agent_id: str | None = None
@@ -254,13 +263,33 @@ def create_app(
 
     @app.get("/api/v1/conversations/{conversation_id}")
     async def conversation_detail(conversation_id: str, p: Principal = Depends(authed("conversations:read"))):
+        _valid_id(conversation_id)
         conv = await app.state.db.get_conversation(p.org_id, conversation_id)
         if not conv:
             raise HTTPException(404, "Conversación no encontrada")
         return conv
 
+    @app.delete("/api/v1/conversations/{conversation_id}", status_code=204)
+    async def delete_conversation(conversation_id: str, p: Principal = Depends(authed("conversations:delete"))):
+        _valid_id(conversation_id)
+        """Derecho de supresión (Ley 21.719 / RGPD): borra transcripciones, eventos y grabación de una conversación."""
+        keys = await app.state.db.delete_conversation(p.org_id, conversation_id)
+        if keys is None:
+            raise HTTPException(404, "Conversación no encontrada")
+        for k in keys:
+            if storage is not None:
+                try:
+                    await storage.delete(k)
+                except Exception:  # noqa: BLE001
+                    ERRORS.labels("recording_delete").inc()
+                    log.warning("recording_delete_failed", key_tail=k[-12:])
+        await app.state.db.audit(p.org_id, p.user_id, "conversation.deleted",
+                                 {"conversation_id": conversation_id, "recordings": len(keys)})
+        return Response(status_code=204)
+
     @app.get("/api/v1/conversations/{conversation_id}/recording")
     async def conversation_recording(conversation_id: str, p: Principal = Depends(authed("recordings:read"))):
+        _valid_id(conversation_id)
         rec = await app.state.db.get_recording(p.org_id, conversation_id)
         if not rec or storage is None:
             raise HTTPException(404, "Esta conversación no tiene grabación")

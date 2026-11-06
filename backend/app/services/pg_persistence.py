@@ -200,3 +200,16 @@ class PostgresPersistence:
                      "WHERE conversation_id = :c AND org_id = :o ORDER BY created_at DESC LIMIT 1"),
                 {"c": conversation_id, "o": org_id})).mappings().first()
         return {**r, "duration_s": float(r["duration_s"]), "created_at": r["created_at"].timestamp()} if r else None
+
+    async def delete_conversation(self, org_id, conversation_id):
+        """Derecho de supresión: la sesión arrastra (CASCADE) conversación, transcripciones, eventos y grabaciones."""
+        async with org_transaction(org_id) as c:
+            row = (await c.execute(
+                text("SELECT c.session_id, COALESCE(array_agg(r.storage_key) FILTER (WHERE r.id IS NOT NULL), '{}') "
+                     "FROM conversations c LEFT JOIN recordings r ON r.conversation_id = c.id "
+                     "WHERE c.id = :c AND c.org_id = :o GROUP BY c.session_id"),
+                {"c": conversation_id, "o": org_id})).first()
+            if not row:
+                return None
+            await c.execute(text("DELETE FROM sessions WHERE id = :s AND org_id = :o"), {"s": row[0], "o": org_id})
+        return list(row[1])

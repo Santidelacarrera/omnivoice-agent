@@ -35,6 +35,7 @@ class Persistence(Protocol):
                                        voice: str | None, language: str | None) -> None: ...
     async def add_recording(self, org_id: str, conversation_id: str, key: str, size: int, duration_s: float) -> None: ...
     async def get_recording(self, org_id: str, conversation_id: str) -> dict[str, Any] | None: ...
+    async def delete_conversation(self, org_id: str, conversation_id: str) -> list[str] | None: ...
 
 
 class InMemoryPersistence:
@@ -123,3 +124,14 @@ class InMemoryPersistence:
             return None
         recs = self.recordings.get(conversation_id)
         return recs[-1] if recs else None
+
+    async def delete_conversation(self, org_id, conversation_id):
+        """Derecho de supresión: borra la conversación y devuelve las claves de grabación a eliminar (None si no existe)."""
+        c = self.convs.get(conversation_id)
+        if not c or c["org_id"] != org_id:
+            return None
+        del self.convs[conversation_id]
+        self.transcripts.pop(conversation_id, None)
+        self.events.pop(conversation_id, None)
+        self.tools = [t for t in self.tools if t["conversation_id"] != conversation_id]
+        return [r["storage_key"] for r in self.recordings.pop(conversation_id, [])]

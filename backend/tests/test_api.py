@@ -175,3 +175,33 @@ def test_ws_rejects_foreign_origin():
         with c.websocket_connect(conn["ws_path"], headers={"origin": "https://evil.example"}):
             pass
     assert e.value.code == 4401
+
+
+def test_admin_can_erase_a_conversation_and_others_cannot():
+    c = make_client()
+    h = auth()
+    _, conn = open_ws(c, h)
+    with c.websocket_connect(conn["ws_path"]) as ws:
+        ws.receive_json()
+        ws.send_bytes(frame(0))
+        ws.receive()
+    admin = auth("admin")
+    items = []
+    for _ in range(100):
+        items = c.get("/api/v1/conversations", headers=admin).json()["items"]
+        if items:
+            break
+        import time
+
+        time.sleep(0.05)
+    cid = items[0]["id"]
+    assert c.delete(f"/api/v1/conversations/{cid}", headers=auth("operator")).status_code == 403
+    assert c.delete(f"/api/v1/conversations/{cid}", headers=auth("admin", org="otra")).status_code == 404
+    assert c.delete(f"/api/v1/conversations/{cid}", headers=admin).status_code == 204
+    assert c.get(f"/api/v1/conversations/{cid}", headers=admin).status_code == 404
+    assert any(a["action"] == "conversation.deleted" for a in c.get("/api/v1/audit-logs", headers=admin).json()["items"])
+
+
+def test_malformed_conversation_id_is_404():
+    c = make_client()
+    assert c.get("/api/v1/conversations/no-es-uuid", headers=auth("admin")).status_code == 404
