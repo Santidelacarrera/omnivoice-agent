@@ -15,7 +15,8 @@ class PostgresRepository:
                 await c.execute(
                     text(
                         "SELECT units, price FROM inventory WHERE org_id = :o AND lower(product) = lower(:p) "
-                        "AND (:c IS NULL OR lower(color) = lower(:c)) AND (:s IS NULL OR upper(size) = upper(:s)) "
+                        "AND (CAST(:c AS text) IS NULL OR lower(color) = lower(CAST(:c AS text))) "
+                        "AND (CAST(:s AS text) IS NULL OR upper(size) = upper(CAST(:s AS text))) "
                         "ORDER BY units DESC LIMIT 1"
                     ),
                     {"o": org_id, "p": product, "c": color, "s": size},
