@@ -4,13 +4,14 @@ El modelo NUNCA toca la base de datos: solo propone llamadas; este módulo valid
 argumentos (Pydantic), comprueba permisos, ejecuta y devuelve resultados reales.
 """
 import asyncio
+import datetime
 import hashlib
 import json
 import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.core.config import get_settings
 from app.observability.metrics import ERRORS, TOOL_DURATION
@@ -36,6 +37,18 @@ class CreateReservationArgs(ToolArgs):
     date: str = Field(pattern=r"^\d{4}-\d{2}-\d{2}$")
     time: str = Field(pattern=r"^\d{2}:\d{2}$")
     party_size: int = Field(ge=1, le=20)
+
+    @field_validator("date")
+    @classmethod
+    def _real_date(cls, v: str) -> str:
+        datetime.date.fromisoformat(v)  # rechaza 2030-13-45
+        return v
+
+    @field_validator("time")
+    @classmethod
+    def _real_time(cls, v: str) -> str:
+        datetime.time.fromisoformat(v)  # rechaza 25:99
+        return v
 
 
 class CreateTicketArgs(ToolArgs):

@@ -1,6 +1,7 @@
 """Repositorio PostgreSQL para las herramientas de negocio. Todas las consultas pasan por
 org_transaction (RLS) y además filtran explícitamente por org_id (defensa en profundidad)."""
 import secrets
+from datetime import date, time
 from typing import Any
 
 from sqlalchemy import text
@@ -44,9 +45,9 @@ class PostgresRepository:
             await c.execute(
                 text(
                     "INSERT INTO reservations (id, org_id, name, date, time, party_size) "
-                    "VALUES (:i, :o, :n, CAST(:d AS date), CAST(:t AS time), :ps)"
+                    "VALUES (:i, :o, :n, :d, :t, :ps)"
                 ),
-                {"i": rid, "o": org_id, "n": data["name"], "d": data["date"], "t": data["time"], "ps": data["party_size"]},
+                {"i": rid, "o": org_id, "n": data["name"], "d": date.fromisoformat(data["date"]), "t": time.fromisoformat(data["time"]), "ps": data["party_size"]},
             )
         return {"reservation_id": rid, **data}
 

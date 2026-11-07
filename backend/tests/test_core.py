@@ -114,3 +114,13 @@ async def test_tool_call_flow_returns_real_result_to_model():
     await asyncio.sleep(0.2)
     assert prov.tool_results and prov.tool_results[0][1]["data"]["available"] is True
     await s.close()
+
+
+async def test_reservation_rejects_impossible_date_and_time():
+    from app.tools.registry import CreateReservationArgs
+
+    ok = CreateReservationArgs(name="Ana", date="2030-01-02", time="19:30", party_size=2)
+    assert ok.date == "2030-01-02"
+    for bad in ({"date": "2030-13-45", "time": "19:30"}, {"date": "2030-01-02", "time": "25:99"}):
+        with pytest.raises(ValueError):
+            CreateReservationArgs(name="Ana", party_size=2, **bad)
