@@ -31,13 +31,14 @@ class PostgresRepository:
         async with org_transaction(org_id) as c:
             row = (
                 await c.execute(
-                    text("SELECT id, name, date, time, party_size FROM reservations WHERE org_id = :o AND id = :i"),
+                    text("SELECT id, name, date, time, party_size, status FROM reservations WHERE org_id = :o AND id = :i"),
                     {"o": org_id, "i": reservation_id},
                 )
             ).first()
         if not row:
             return None
-        return {"reservation_id": row.id, "name": row.name, "date": str(row.date), "time": str(row.time)[:5], "party_size": row.party_size}
+        return {"reservation_id": row.id, "name": row.name, "date": str(row.date), "time": str(row.time)[:5], "party_size": row.party_size,
+                "status": row.status}
 
     async def create_reservation(self, org_id: str, data: dict[str, Any]) -> dict[str, Any]:
         rid = secrets.token_hex(4).upper()
@@ -49,7 +50,31 @@ class PostgresRepository:
                 ),
                 {"i": rid, "o": org_id, "n": data["name"], "d": date.fromisoformat(data["date"]), "t": time.fromisoformat(data["time"]), "ps": data["party_size"]},
             )
-        return {"reservation_id": rid, **data}
+        return {"reservation_id": rid, **data, "status": "confirmed"}
+
+    async def update_reservation(self, org_id: str, reservation_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+        cols, params = [], {"o": org_id, "i": reservation_id}
+        if "date" in changes:
+            cols.append("date = :d")
+            params["d"] = date.fromisoformat(changes["date"])
+        if "time" in changes:
+            cols.append("time = :t")
+            params["t"] = time.fromisoformat(changes["time"])
+        if "party_size" in changes:
+            cols.append("party_size = :ps")
+            params["ps"] = changes["party_size"]
+        if not cols:
+            return await self.get_reservation(org_id, reservation_id)
+        async with org_transaction(org_id) as c:
+            n = (await c.execute(text("UPDATE reservations SET " + ", ".join(cols) + ", updated_at = now() "  # noqa: S608 - columnas de una lista cerrada
+                                      "WHERE org_id = :o AND id = :i AND status = 'confirmed'"), params)).rowcount
+        return await self.get_reservation(org_id, reservation_id) if n else None
+
+    async def cancel_reservation(self, org_id: str, reservation_id: str) -> dict[str, Any] | None:
+        async with org_transaction(org_id) as c:
+            await c.execute(text("UPDATE reservations SET status = 'cancelled', updated_at = now() WHERE org_id = :o AND id = :i"),
+                            {"o": org_id, "i": reservation_id})
+        return await self.get_reservation(org_id, reservation_id)
 
     async def create_ticket(self, org_id: str, data: dict[str, Any]) -> dict[str, Any]:
         tid = secrets.token_hex(4).upper()

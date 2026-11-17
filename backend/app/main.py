@@ -19,7 +19,7 @@ from app.observability.metrics import BARGE_WINDOW, BUDGET_REJECTED, COST_WINDOW
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.realtime.provider import FakeProvider, OpenAIRealtimeProvider, RealtimeProvider
 from app.security.auth import Principal, issue_token, require
-from app.services.persistence import InMemoryPersistence, Persistence
+from app.services.persistence import ApiKeyPrefixTaken, InMemoryPersistence, Persistence, PhoneNumberTaken
 from app.services.recordings import RecordingStorage, build_storage
 from app.services.retention import InMemoryRetentionBackend, RetentionBackend, RetentionJob
 from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore
@@ -50,6 +50,40 @@ class CreateSessionBody(BaseModel):
     recording_consent: bool = False  # consentimiento explícito de grabación; por defecto NO
 
 
+class UpdateAgentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    instructions: str | None = Field(default=None, min_length=10, max_length=4000)
+    tools: list[str] | None = Field(default=None, max_length=20)
+    voice: str | None = Field(default=None, max_length=40)
+    language: str | None = Field(default=None, pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
+
+
+class RollbackBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(ge=1)
+
+
+class PhoneNumberBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    e164: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$")
+    agent_id: str | None = None
+    transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
+
+
+class CreateApiKeyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=80)
+    role: str = Field(default="viewer", pattern=r"^(admin|manager|operator|analyst|viewer)$")
+    expires_in_days: int | None = Field(default=None, ge=1, le=730)
+
+
+class UpdatePhoneBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str | None = None  # null = quitar el agente
+    transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # null = usar el operador global
+
+
 class CreateAgentBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=2, max_length=80)
@@ -75,6 +109,7 @@ def create_app(
     recording_storage: RecordingStorage | None = None,
     retention_backend: RetentionBackend | None = None,
     twilio: Any = None,
+    simulator_llm: Any = None,
 ) -> FastAPI:
     s = settings or get_settings()
     live: dict[str, VoiceSession] = {}
@@ -112,7 +147,12 @@ def create_app(
                                              s.retention_interval_seconds, s.retention_batch_size)
                 app.state.retention = retention_job
                 retention_job.start()
+        dialer = getattr(app.state, "dialer", None)
+        if dialer and s.outbound_scheduler_enabled:
+            dialer.start()
         yield
+        if dialer:
+            await dialer.stop()
         if retention_job:
             await retention_job.stop()
         # Cierre ordenado: finaliza sesiones vivas para no perder conversaciones ni consumo.
@@ -308,13 +348,178 @@ def create_app(
 
     @app.post("/api/v1/agents", status_code=201)
     async def create_agent(body: CreateAgentBody, p: Principal = Depends(authed("agents:write"))):
-        known = {t["name"] for t in registry.schemas()}
-        unknown = set(body.tools) - known
-        if unknown:
-            raise HTTPException(422, f"Herramientas desconocidas: {sorted(unknown)}")
+        _check_tools(body.tools)
         agent = await app.state.db.create_agent(p.org_id, body.name, body.instructions, body.tools, body.voice, body.language)
         await app.state.db.audit(p.org_id, p.user_id, "agent.created", {"agent_id": agent["id"], "tools": body.tools})
         return agent
+
+    class SimulateBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        turns: list[str] = Field(min_length=1, max_length=10)
+
+    @app.post("/api/v1/agents/{agent_id}/simulate")
+    async def simulate_agent(agent_id: str, body: SimulateBody, p: Principal = Depends(authed("agents:write"))):
+        """Prueba un agente (también en borrador) con una conversación de texto sobre herramientas de demostración."""
+        agent = await _agent_or_404(p.org_id, agent_id)
+        if agent["status"] == "archived":
+            raise HTTPException(409, "Un agente archivado no se puede probar")
+        llm = simulator_llm or getattr(app.state, "simulator_llm", None)
+        if llm is None and s.anthropic_api_key:
+            from app.realtime.cascade import AnthropicLLM
+
+            llm = app.state.simulator_llm = AnthropicLLM(s)
+        if llm is None:
+            raise HTTPException(503, "Simulador no configurado (falta ANTHROPIC_API_KEY)")
+        if not await app.state.store.hit("simulate", p.org_id, s.simulate_per_minute, 60):
+            raise HTTPException(429, "Demasiadas simulaciones; espera un minuto")
+        from app.orchestration.simulator import SimulationError, simulate
+
+        try:
+            result = await simulate(s, llm, agent, p.org_id, body.turns)
+        except SimulationError as exc:
+            raise HTTPException(exc.status, exc.message) from None
+        await app.state.db.audit(p.org_id, p.user_id, "agent.simulated",
+                                 {"agent_id": agent_id, "turns": len(body.turns), "tokens_in": result["usage"]["in"],
+                                  "tokens_out": result["usage"]["out"]})  # no se guardan las frases de prueba
+        return result
+
+    def _check_tools(tools):
+        unknown = set(tools) - {t["name"] for t in registry.schemas()}
+        if unknown:
+            raise HTTPException(422, f"Herramientas desconocidas: {sorted(unknown)}")
+
+    async def _agent_or_404(org_id: str, agent_id: str):
+        a = await app.state.db.get_agent(org_id, _valid_id(agent_id))
+        if not a:
+            raise HTTPException(404, "Agente no encontrado")
+        return a
+
+    @app.get("/api/v1/agents/{agent_id}")
+    async def get_agent(agent_id: str, p: Principal = Depends(authed("agents:read"))):
+        return await _agent_or_404(p.org_id, agent_id)
+
+    @app.patch("/api/v1/agents/{agent_id}")
+    async def update_agent(agent_id: str, body: UpdateAgentBody, p: Principal = Depends(authed("agents:write"))):
+        await _agent_or_404(p.org_id, agent_id)
+        changes = body.model_dump(exclude_unset=True, exclude_none=True)
+        if not changes:
+            raise HTTPException(422, "Sin cambios")
+        if "tools" in changes:
+            _check_tools(changes["tools"])
+        agent = await app.state.db.update_agent(p.org_id, agent_id, changes)
+        if agent is None:
+            raise HTTPException(409, "Un agente archivado no se puede editar")
+        await app.state.db.audit(p.org_id, p.user_id, "agent.updated",
+                                 {"agent_id": agent_id, "version": agent["version"], "fields": sorted(changes)})
+        return agent
+
+    @app.get("/api/v1/agents/{agent_id}/versions")
+    async def agent_versions(agent_id: str, p: Principal = Depends(authed("agents:read"))):
+        versions = await app.state.db.list_agent_versions(p.org_id, _valid_id(agent_id))
+        if versions is None:
+            raise HTTPException(404, "Agente no encontrado")
+        return {"items": versions}
+
+    @app.post("/api/v1/agents/{agent_id}/rollback")
+    async def rollback_agent(agent_id: str, body: RollbackBody, p: Principal = Depends(authed("agents:publish"))):
+        await _agent_or_404(p.org_id, agent_id)
+        agent = await app.state.db.rollback_agent(p.org_id, agent_id, body.version)
+        if agent is None:
+            raise HTTPException(404, "Versión no encontrada o agente archivado")
+        await app.state.db.audit(p.org_id, p.user_id, "agent.rolled_back",
+                                 {"agent_id": agent_id, "to": body.version, "new_version": agent["version"]})
+        return agent
+
+    def _status_route(name: str, status: str, action: str):
+        async def handler(agent_id: str, p: Principal = Depends(authed("agents:publish"))):
+            await _agent_or_404(p.org_id, agent_id)
+            agent = await app.state.db.set_agent_status(p.org_id, agent_id, status)
+            await app.state.db.audit(p.org_id, p.user_id, action, {"agent_id": agent_id})
+            return agent
+
+        handler.__name__ = name
+        app.post(f"/api/v1/agents/{{agent_id}}/{name}")(handler)
+
+    _status_route("publish", "published", "agent.published")
+    _status_route("archive", "archived", "agent.archived")
+
+    def _humans_only(p: Principal) -> None:
+        """Una clave de API no gestiona claves: si se filtra, no puede crear otras para perpetuar el acceso."""
+        if p.user_id.startswith("apikey:"):
+            raise HTTPException(403, "Las claves de API no pueden gestionar claves")
+
+    @app.post("/api/v1/api-keys", status_code=201)
+    async def create_api_key(body: CreateApiKeyBody, p: Principal = Depends(authed("apikeys:write"))):
+        """Crea una clave para integraciones. La clave completa se devuelve **una sola vez**; después solo se ve su prefijo."""
+        _humans_only(p)
+        from datetime import datetime, timedelta, timezone
+
+        from app.security import apikeys
+        from app.security.auth import ROLE_PERMISSIONS
+
+        # Nadie entrega más poder del que tiene: una clave no puede superar los permisos de quien la crea.
+        if not ROLE_PERMISSIONS[body.role] <= ROLE_PERMISSIONS.get(p.role, set()):
+            raise HTTPException(403, "No puedes crear una clave con más permisos que tu propio rol")
+        expires = datetime.now(timezone.utc) + timedelta(days=body.expires_in_days) if body.expires_in_days else None
+        for _ in range(5):
+            key, prefix, key_hash = apikeys.generate()
+            try:
+                created = await app.state.db.create_api_key(p.org_id, body.name, prefix, key_hash, body.role, p.user_id, expires)
+                break
+            except ApiKeyPrefixTaken:
+                continue
+        else:
+            raise HTTPException(503, "No se pudo generar la clave; inténtalo de nuevo")
+        await app.state.db.audit(p.org_id, p.user_id, "apikey.created", {"key_id": created["id"], "role": body.role, "prefix": prefix})
+        return {**created, "key": key, "warning": "Guarda esta clave ahora: no se vuelve a mostrar."}
+
+    @app.get("/api/v1/api-keys")
+    async def list_api_keys(p: Principal = Depends(authed("apikeys:write"))):
+        _humans_only(p)
+        return {"items": await app.state.db.list_api_keys(p.org_id)}
+
+    @app.delete("/api/v1/api-keys/{key_id}", status_code=204)
+    async def revoke_api_key(key_id: str, p: Principal = Depends(authed("apikeys:write"))):
+        _humans_only(p)
+        if not await app.state.db.revoke_api_key(p.org_id, _valid_id(key_id)):
+            raise HTTPException(404, "Clave no encontrada")
+        await app.state.db.audit(p.org_id, p.user_id, "apikey.revoked", {"key_id": key_id})
+        return Response(status_code=204)
+
+    @app.get("/api/v1/phone-numbers")
+    async def list_phones(p: Principal = Depends(authed("phones:read"))):
+        return {"items": await app.state.db.list_phone_numbers(p.org_id)}
+
+    @app.post("/api/v1/phone-numbers", status_code=201)
+    async def add_phone(body: PhoneNumberBody, p: Principal = Depends(authed("phones:write"))):
+        if body.agent_id is not None:
+            await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
+        try:
+            phone = await app.state.db.add_phone_number(p.org_id, body.e164, body.agent_id, body.transfer_number)
+        except PhoneNumberTaken:
+            raise HTTPException(409, "Ese número ya está registrado") from None
+        await app.state.db.audit(p.org_id, p.user_id, "phone.added", {"phone_id": phone["id"], "agent_id": body.agent_id})
+        return phone
+
+    @app.patch("/api/v1/phone-numbers/{phone_id}")
+    async def update_phone(phone_id: str, body: UpdatePhoneBody, p: Principal = Depends(authed("phones:write"))):
+        changes = body.model_dump(exclude_unset=True)
+        if not changes:
+            raise HTTPException(422, "Sin cambios")
+        if changes.get("agent_id"):
+            await _agent_or_404(p.org_id, changes["agent_id"])
+        phone = await app.state.db.update_phone_number(p.org_id, _valid_id(phone_id), changes)
+        if not phone:
+            raise HTTPException(404, "Número no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "phone.updated", {"phone_id": phone_id, "fields": sorted(changes)})
+        return phone
+
+    @app.delete("/api/v1/phone-numbers/{phone_id}", status_code=204)
+    async def delete_phone(phone_id: str, p: Principal = Depends(authed("phones:write"))):
+        if not await app.state.db.delete_phone_number(p.org_id, _valid_id(phone_id)):
+            raise HTTPException(404, "Número no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "phone.deleted", {"phone_id": phone_id})
+        return Response(status_code=204)
 
     @app.get("/api/v1/metrics")
     async def api_metrics(p: Principal = Depends(authed("metrics:read"))):

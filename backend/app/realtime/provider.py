@@ -108,7 +108,7 @@ class FakeProvider:
         self._task: asyncio.Task | None = None
 
     async def connect(self, instructions, tools, voice=None, language=None) -> None:
-        self.voice, self.language = voice, language
+        self.voice, self.language, self.instructions = voice, language, instructions
 
     async def _respond(self) -> None:
         for ev in self.script:

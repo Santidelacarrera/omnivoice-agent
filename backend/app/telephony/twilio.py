@@ -33,9 +33,11 @@ def stream_twiml(ws_url: str, parameters: dict[str, str]) -> str:
     return f'<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url={quoteattr(ws_url)}>{params}</Stream></Connect></Response>'
 
 
-def dial_twiml(number: str, caller_id: str | None = None) -> str:
+def dial_twiml(number: str, caller_id: str | None = None, whisper_url: str | None = None) -> str:
+    """Marca al operador. Con `whisper_url`, Twilio lo pide al contestar el operador y reproduce su TwiML solo a él."""
     cid = f" callerId={quoteattr(caller_id)}" if caller_id else ""
-    return f'<?xml version="1.0" encoding="UTF-8"?><Response><Say language="es-ES">Le paso con un operador.</Say><Dial{cid}>{escape(number)}</Dial></Response>'
+    target = f"<Number url={quoteattr(whisper_url)}>{escape(number)}</Number>" if whisper_url else escape(number)
+    return f'<?xml version="1.0" encoding="UTF-8"?><Response><Say language="es-ES">Le paso con un operador.</Say><Dial{cid}>{target}</Dial></Response>'
 
 
 def hangup_twiml(message: str) -> str:
@@ -50,9 +52,10 @@ class TwilioClient:
         self._base = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}"
 
     async def create_call(self, to: str, from_: str, twiml_url: str, status_callback: str | None = None) -> dict[str, Any]:
-        data = {"To": to, "From": from_, "Url": twiml_url, "Method": "POST"}
+        data: dict[str, Any] = {"To": to, "From": from_, "Url": twiml_url, "Method": "POST"}
         if status_callback:
             data["StatusCallback"] = status_callback
+            data["StatusCallbackEvent"] = ["initiated", "ringing", "answered", "completed"]
         r = await self._http.post(f"{self._base}/Calls.json", data=data, auth=self._auth)
         r.raise_for_status()
         return r.json()
@@ -62,8 +65,10 @@ class TwilioClient:
         r = await self._http.post(f"{self._base}/Calls/{call_sid}.json", data={"Twiml": twiml}, auth=self._auth)
         r.raise_for_status()
 
-    async def hangup(self, call_sid: str) -> None:
-        r = await self._http.post(f"{self._base}/Calls/{call_sid}.json", data={"Status": "completed"}, auth=self._auth)
+    async def hangup(self, call_sid: str, cancel: bool = False) -> None:
+        """`cancel=True` para llamadas que aún no se contestaron (en cola o sonando); si no, se cuelga la llamada en curso."""
+        r = await self._http.post(f"{self._base}/Calls/{call_sid}.json", data={"Status": "canceled" if cancel else "completed"},
+                                  auth=self._auth)
         r.raise_for_status()
 
     async def aclose(self) -> None:

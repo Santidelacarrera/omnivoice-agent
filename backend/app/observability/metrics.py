@@ -31,6 +31,8 @@ BARGE_IN = Histogram(
 )
 TOOL_DURATION = Histogram("omnivoice_tool_seconds", "Duración de herramientas", ["tool", "status"])
 ACTIVE_SESSIONS = Gauge("omnivoice_active_sessions", "Sesiones activas")
+OUTBOUND_JOBS = Counter("omnivoice_outbound_jobs_total", "Trabajos de llamadas salientes", ["event"])
+CALL_EVENTS = Counter("omnivoice_call_events_total", "Eventos de estado de llamada", ["status", "outcome"])
 ERRORS = Counter("omnivoice_errors_total", "Errores", ["kind"])
 RETENTION_DELETED = Counter("omnivoice_retention_deleted_total", "Registros purgados por retención", ["kind"])
 RETENTION_RUNS = Counter("omnivoice_retention_runs_total", "Pasadas completas del job de retención")
