@@ -5,10 +5,11 @@ import uuid
 
 import structlog
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from app.database.engine import org_transaction
 from app.observability.metrics import ERRORS
-from app.services.persistence import COST_PER_AUDIO_MINUTE_USD
+from app.services.persistence import _VERSIONED, COST_PER_AUDIO_MINUTE_USD, PhoneNumberTaken
 
 log = structlog.get_logger()
 
@@ -140,7 +141,7 @@ class PostgresPersistence:
     async def list_agents(self, org_id):
         async with org_transaction(org_id) as c:
             rows = (await c.execute(
-                text("SELECT a.id, a.name, a.instructions, a.voice, a.language, "
+                text("SELECT a.id, a.name, a.instructions, a.voice, a.language, a.status, a.version, "
                      "COALESCE(array_agg(t.tool_name) FILTER (WHERE t.enabled), '{}') AS tools "
                      "FROM agents a LEFT JOIN agent_tools t ON t.agent_id = a.id "
                      "WHERE a.org_id = :o GROUP BY a.id ORDER BY a.created_at"), {"o": org_id})).mappings().all()
@@ -151,6 +152,8 @@ class PostgresPersistence:
 
     async def create_agent(self, org_id, name, instructions, tools, voice, language):
         aid = str(uuid.uuid4())
+        agent = {"id": aid, "name": name, "instructions": instructions, "tools": list(tools), "voice": voice,
+                 "language": language, "status": "draft", "version": 1}
         async with org_transaction(org_id) as c:
             await c.execute(
                 text("INSERT INTO agents (id, org_id, name, instructions, voice, language) "
@@ -158,7 +161,87 @@ class PostgresPersistence:
                 {"i": aid, "o": org_id, "n": name, "ins": instructions, "v": voice, "l": language})
             for tool in tools:
                 await c.execute(text("INSERT INTO agent_tools (agent_id, tool_name) VALUES (:a, :t)"), {"a": aid, "t": tool})
-        return {"id": aid, "name": name, "instructions": instructions, "tools": tools, "voice": voice, "language": language}
+            await self._snapshot(c, org_id, agent)
+        return agent
+
+    @staticmethod
+    async def _snapshot(c, org_id, agent):
+        snap = {"version": agent["version"], **{k: agent[k] for k in _VERSIONED}}
+        await c.execute(text("INSERT INTO agent_versions (agent_id, org_id, version, snapshot) "
+                             "VALUES (:a, :o, :v, CAST(:s AS jsonb))"),
+                        {"a": agent["id"], "o": org_id, "v": agent["version"], "s": json.dumps(snap)})
+
+    @staticmethod
+    async def _current(c, org_id, agent_id):
+        r = (await c.execute(
+            text("SELECT a.id, a.name, a.instructions, a.voice, a.language, a.status, a.version, "
+                 "COALESCE(array_agg(t.tool_name) FILTER (WHERE t.enabled), '{}') AS tools "
+                 "FROM agents a LEFT JOIN agent_tools t ON t.agent_id = a.id "
+                 "WHERE a.id = :a AND a.org_id = :o GROUP BY a.id"), {"a": agent_id, "o": org_id})).mappings().first()
+        return {**r, "id": str(r["id"]), "tools": sorted(r["tools"])} if r else None
+
+    async def update_agent(self, org_id, agent_id, changes):
+        async with org_transaction(org_id) as c:
+            locked = (await c.execute(text("SELECT status FROM agents WHERE id = :a AND org_id = :o FOR UPDATE"),
+                                      {"a": agent_id, "o": org_id})).first()
+            if not locked or locked[0] == "archived":
+                return None
+            cur = dict(await self._current(c, org_id, agent_id))
+            cur.update(changes)
+            cur["version"] += 1
+            await c.execute(
+                text("UPDATE agents SET name=:n, instructions=:ins, voice=:v, language=:l, version=:ver "
+                     "WHERE id=:a AND org_id=:o"),
+                {"n": cur["name"], "ins": cur["instructions"], "v": cur["voice"], "l": cur["language"],
+                 "ver": cur["version"], "a": agent_id, "o": org_id})
+            await c.execute(text("DELETE FROM agent_tools WHERE agent_id = :a"), {"a": agent_id})
+            for tool in cur["tools"]:
+                await c.execute(text("INSERT INTO agent_tools (agent_id, tool_name) VALUES (:a, :t)"), {"a": agent_id, "t": tool})
+            await self._snapshot(c, org_id, cur)
+        return cur
+
+    async def list_agent_versions(self, org_id, agent_id):
+        async with org_transaction(org_id) as c:
+            if not (await c.execute(text("SELECT 1 FROM agents WHERE id = :a AND org_id = :o"),
+                                    {"a": agent_id, "o": org_id})).first():
+                return None
+            rows = (await c.execute(text("SELECT snapshot, created_at FROM agent_versions WHERE agent_id = :a "
+                                         "AND org_id = :o ORDER BY version"), {"a": agent_id, "o": org_id})).all()
+        return [{**(r[0] if isinstance(r[0], dict) else json.loads(r[0])), "created_at": r[1].timestamp()} for r in rows]
+
+    async def rollback_agent(self, org_id, agent_id, version):
+        versions = await self.list_agent_versions(org_id, agent_id)
+        old = next((v for v in versions or [] if v["version"] == version), None)
+        if old is None:
+            return None
+        return await self.update_agent(org_id, agent_id, {k: old[k] for k in _VERSIONED})
+
+    async def set_agent_status(self, org_id, agent_id, status):
+        async with org_transaction(org_id) as c:
+            n = (await c.execute(text("UPDATE agents SET status = :s WHERE id = :a AND org_id = :o"),
+                                 {"s": status, "a": agent_id, "o": org_id})).rowcount
+            return await self._current(c, org_id, agent_id) if n else None
+
+    async def list_phone_numbers(self, org_id):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT id, e164, agent_id FROM phone_numbers WHERE org_id = :o ORDER BY created_at"),
+                                    {"o": org_id})).all()
+        return [{"id": str(r[0]), "e164": r[1], "agent_id": str(r[2]) if r[2] else None} for r in rows]
+
+    async def add_phone_number(self, org_id, e164, agent_id):
+        pid = str(uuid.uuid4())
+        try:
+            async with org_transaction(org_id) as c:
+                await c.execute(text("INSERT INTO phone_numbers (id, org_id, e164, agent_id) VALUES (:i, :o, :e, :a)"),
+                                {"i": pid, "o": org_id, "e": e164, "a": agent_id})
+        except IntegrityError as exc:
+            raise PhoneNumberTaken(e164) from exc
+        return {"id": pid, "e164": e164, "agent_id": agent_id}
+
+    async def delete_phone_number(self, org_id, phone_id):
+        async with org_transaction(org_id) as c:
+            return bool((await c.execute(text("DELETE FROM phone_numbers WHERE id = :i AND org_id = :o"),
+                                         {"i": phone_id, "o": org_id})).rowcount)
 
     async def usage_summary(self, org_id):
         async with org_transaction(org_id) as c:

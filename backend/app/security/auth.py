@@ -10,10 +10,17 @@ from app.core.config import get_settings
 
 bearer = HTTPBearer(auto_error=False)
 
+_READ = {"agents:read", "conversations:read", "metrics:read"}
+_READ = {"agents:read", "conversations:read", "metrics:read"}
+_FULL = {*_READ, "conversations:delete", "agents:write", "agents:publish", "audit:read", "session:create",
+         "recordings:read", "telephony:call", "phones:read", "phones:write"}
 ROLE_PERMISSIONS: dict[str, set[str]] = {
-    "admin": {"conversations:delete", "agents:write", "agents:read", "conversations:read", "metrics:read", "audit:read", "session:create",
-              "recordings:read", "telephony:call"},
-    "operator": {"agents:read", "conversations:read", "metrics:read", "session:create", "telephony:call"},
+    "owner": set(_FULL),
+    "admin": set(_FULL),
+    "manager": {*_READ, "agents:write", "agents:publish", "session:create", "telephony:call", "phones:read", "audit:read"},
+    "operator": {*_READ, "session:create", "telephony:call", "phones:read"},
+    "analyst": {*_READ, "phones:read", "audit:read"},
+    "viewer": set(_READ),
     "customer": {"session:create"},
 }
 

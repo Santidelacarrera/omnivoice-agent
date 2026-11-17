@@ -15,6 +15,18 @@ log = structlog.get_logger()
 COST_PER_AUDIO_MINUTE_USD = 0.06
 
 
+_VERSIONED = ("name", "instructions", "tools", "voice", "language")
+
+
+class PhoneNumberTaken(Exception):
+    """El número ya está registrado (en esta u otra organización: no se revela cuál)."""
+
+
+def _snapshot(agent: dict[str, Any]) -> dict[str, Any]:
+    return {"version": agent["version"], **{k: (list(agent[k]) if k == "tools" else agent[k]) for k in _VERSIONED}}
+
+
+
 class Persistence(Protocol):
     async def audit(self, org_id: str | None, actor: str | None, action: str, detail: dict[str, Any]) -> None: ...
     async def start_conversation(self, org_id: str, session_id: str, user_id: str | None) -> str: ...
@@ -30,6 +42,13 @@ class Persistence(Protocol):
     async def get_agent(self, org_id: str, agent_id: str) -> dict[str, Any] | None: ...
     async def create_agent(self, org_id: str, name: str, instructions: str, tools: list[str],
                            voice: str | None, language: str) -> dict[str, Any]: ...
+    async def update_agent(self, org_id: str, agent_id: str, changes: dict[str, Any]) -> dict[str, Any] | None: ...
+    async def list_agent_versions(self, org_id: str, agent_id: str) -> list[dict[str, Any]] | None: ...
+    async def rollback_agent(self, org_id: str, agent_id: str, version: int) -> dict[str, Any] | None: ...
+    async def set_agent_status(self, org_id: str, agent_id: str, status: str) -> dict[str, Any] | None: ...
+    async def list_phone_numbers(self, org_id: str) -> list[dict[str, Any]]: ...
+    async def add_phone_number(self, org_id: str, e164: str, agent_id: str | None) -> dict[str, Any]: ...
+    async def delete_phone_number(self, org_id: str, phone_id: str) -> bool: ...
     async def org_policy(self, org_id: str) -> dict[str, Any]: ...
     async def set_conversation_options(self, org_id: str, conversation_id: str, *, recording_consent: bool,
                                        voice: str | None, language: str | None) -> None: ...
@@ -41,6 +60,8 @@ class Persistence(Protocol):
 class InMemoryPersistence:
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, Any]] = {}
+        self.agent_versions: dict[str, list[dict[str, Any]]] = {}
+        self.phones: dict[str, dict[str, Any]] = {}
         self.audits: list[dict[str, Any]] = []
         self.convs: dict[str, dict[str, Any]] = {}
         self.transcripts: dict[str, list[dict[str, Any]]] = {}
@@ -101,8 +122,53 @@ class InMemoryPersistence:
     async def create_agent(self, org_id, name, instructions, tools, voice, language):
         aid = str(uuid.uuid4())
         self.agents[aid] = {"id": aid, "org_id": org_id, "name": name, "instructions": instructions,
-                            "tools": tools, "voice": voice, "language": language}
-        return self.agents[aid]
+                            "tools": tools, "voice": voice, "language": language, "status": "draft", "version": 1}
+        self.agent_versions[aid] = [_snapshot(self.agents[aid])]
+        return dict(self.agents[aid])
+
+    async def update_agent(self, org_id, agent_id, changes):
+        a = await self.get_agent(org_id, agent_id)
+        if not a or a["status"] == "archived":
+            return None
+        a.update(changes)
+        a["version"] += 1
+        self.agent_versions[agent_id].append(_snapshot(a))
+        return dict(a)
+
+    async def list_agent_versions(self, org_id, agent_id):
+        if not await self.get_agent(org_id, agent_id):
+            return None
+        return [dict(v) for v in self.agent_versions[agent_id]]
+
+    async def rollback_agent(self, org_id, agent_id, version):
+        old = next((v for v in (await self.list_agent_versions(org_id, agent_id) or []) if v["version"] == version), None)
+        if old is None:
+            return None
+        return await self.update_agent(org_id, agent_id, {k: old[k] for k in _VERSIONED})
+
+    async def set_agent_status(self, org_id, agent_id, status):
+        a = await self.get_agent(org_id, agent_id)
+        if not a:
+            return None
+        a["status"] = status
+        return dict(a)
+
+    async def list_phone_numbers(self, org_id):
+        return [dict(n) for n in self.phones.values() if n["org_id"] == org_id]
+
+    async def add_phone_number(self, org_id, e164, agent_id):
+        if any(n["e164"] == e164 for n in self.phones.values()):
+            raise PhoneNumberTaken(e164)
+        pid = str(uuid.uuid4())
+        self.phones[pid] = {"id": pid, "org_id": org_id, "e164": e164, "agent_id": agent_id}
+        return dict(self.phones[pid])
+
+    async def delete_phone_number(self, org_id, phone_id):
+        n = self.phones.get(phone_id)
+        if not n or n["org_id"] != org_id:
+            return False
+        del self.phones[phone_id]
+        return True
 
     async def org_policy(self, org_id):
         enabled = self.recording_enabled_orgs is None or org_id in self.recording_enabled_orgs

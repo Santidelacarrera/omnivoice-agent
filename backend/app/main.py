@@ -19,7 +19,7 @@ from app.observability.metrics import BARGE_WINDOW, BUDGET_REJECTED, COST_WINDOW
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.realtime.provider import FakeProvider, OpenAIRealtimeProvider, RealtimeProvider
 from app.security.auth import Principal, issue_token, require
-from app.services.persistence import InMemoryPersistence, Persistence
+from app.services.persistence import InMemoryPersistence, Persistence, PhoneNumberTaken
 from app.services.recordings import RecordingStorage, build_storage
 from app.services.retention import InMemoryRetentionBackend, RetentionBackend, RetentionJob
 from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore
@@ -48,6 +48,26 @@ class CreateSessionBody(BaseModel):
     voice: str | None = Field(default=None, max_length=40)
     language: str | None = Field(default=None, pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
     recording_consent: bool = False  # consentimiento explícito de grabación; por defecto NO
+
+
+class UpdateAgentBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str | None = Field(default=None, min_length=2, max_length=80)
+    instructions: str | None = Field(default=None, min_length=10, max_length=4000)
+    tools: list[str] | None = Field(default=None, max_length=20)
+    voice: str | None = Field(default=None, max_length=40)
+    language: str | None = Field(default=None, pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
+
+
+class RollbackBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    version: int = Field(ge=1)
+
+
+class PhoneNumberBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    e164: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$")
+    agent_id: str | None = None
 
 
 class CreateAgentBody(BaseModel):
@@ -308,13 +328,92 @@ def create_app(
 
     @app.post("/api/v1/agents", status_code=201)
     async def create_agent(body: CreateAgentBody, p: Principal = Depends(authed("agents:write"))):
-        known = {t["name"] for t in registry.schemas()}
-        unknown = set(body.tools) - known
-        if unknown:
-            raise HTTPException(422, f"Herramientas desconocidas: {sorted(unknown)}")
+        _check_tools(body.tools)
         agent = await app.state.db.create_agent(p.org_id, body.name, body.instructions, body.tools, body.voice, body.language)
         await app.state.db.audit(p.org_id, p.user_id, "agent.created", {"agent_id": agent["id"], "tools": body.tools})
         return agent
+
+    def _check_tools(tools):
+        unknown = set(tools) - {t["name"] for t in registry.schemas()}
+        if unknown:
+            raise HTTPException(422, f"Herramientas desconocidas: {sorted(unknown)}")
+
+    async def _agent_or_404(org_id: str, agent_id: str):
+        a = await app.state.db.get_agent(org_id, _valid_id(agent_id))
+        if not a:
+            raise HTTPException(404, "Agente no encontrado")
+        return a
+
+    @app.get("/api/v1/agents/{agent_id}")
+    async def get_agent(agent_id: str, p: Principal = Depends(authed("agents:read"))):
+        return await _agent_or_404(p.org_id, agent_id)
+
+    @app.patch("/api/v1/agents/{agent_id}")
+    async def update_agent(agent_id: str, body: UpdateAgentBody, p: Principal = Depends(authed("agents:write"))):
+        await _agent_or_404(p.org_id, agent_id)
+        changes = body.model_dump(exclude_unset=True, exclude_none=True)
+        if not changes:
+            raise HTTPException(422, "Sin cambios")
+        if "tools" in changes:
+            _check_tools(changes["tools"])
+        agent = await app.state.db.update_agent(p.org_id, agent_id, changes)
+        if agent is None:
+            raise HTTPException(409, "Un agente archivado no se puede editar")
+        await app.state.db.audit(p.org_id, p.user_id, "agent.updated",
+                                 {"agent_id": agent_id, "version": agent["version"], "fields": sorted(changes)})
+        return agent
+
+    @app.get("/api/v1/agents/{agent_id}/versions")
+    async def agent_versions(agent_id: str, p: Principal = Depends(authed("agents:read"))):
+        versions = await app.state.db.list_agent_versions(p.org_id, _valid_id(agent_id))
+        if versions is None:
+            raise HTTPException(404, "Agente no encontrado")
+        return {"items": versions}
+
+    @app.post("/api/v1/agents/{agent_id}/rollback")
+    async def rollback_agent(agent_id: str, body: RollbackBody, p: Principal = Depends(authed("agents:publish"))):
+        await _agent_or_404(p.org_id, agent_id)
+        agent = await app.state.db.rollback_agent(p.org_id, agent_id, body.version)
+        if agent is None:
+            raise HTTPException(404, "Versión no encontrada o agente archivado")
+        await app.state.db.audit(p.org_id, p.user_id, "agent.rolled_back",
+                                 {"agent_id": agent_id, "to": body.version, "new_version": agent["version"]})
+        return agent
+
+    def _status_route(name: str, status: str, action: str):
+        async def handler(agent_id: str, p: Principal = Depends(authed("agents:publish"))):
+            await _agent_or_404(p.org_id, agent_id)
+            agent = await app.state.db.set_agent_status(p.org_id, agent_id, status)
+            await app.state.db.audit(p.org_id, p.user_id, action, {"agent_id": agent_id})
+            return agent
+
+        handler.__name__ = name
+        app.post(f"/api/v1/agents/{{agent_id}}/{name}")(handler)
+
+    _status_route("publish", "published", "agent.published")
+    _status_route("archive", "archived", "agent.archived")
+
+    @app.get("/api/v1/phone-numbers")
+    async def list_phones(p: Principal = Depends(authed("phones:read"))):
+        return {"items": await app.state.db.list_phone_numbers(p.org_id)}
+
+    @app.post("/api/v1/phone-numbers", status_code=201)
+    async def add_phone(body: PhoneNumberBody, p: Principal = Depends(authed("phones:write"))):
+        if body.agent_id is not None:
+            await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
+        try:
+            phone = await app.state.db.add_phone_number(p.org_id, body.e164, body.agent_id)
+        except PhoneNumberTaken:
+            raise HTTPException(409, "Ese número ya está registrado") from None
+        await app.state.db.audit(p.org_id, p.user_id, "phone.added", {"phone_id": phone["id"], "agent_id": body.agent_id})
+        return phone
+
+    @app.delete("/api/v1/phone-numbers/{phone_id}", status_code=204)
+    async def delete_phone(phone_id: str, p: Principal = Depends(authed("phones:write"))):
+        if not await app.state.db.delete_phone_number(p.org_id, _valid_id(phone_id)):
+            raise HTTPException(404, "Número no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "phone.deleted", {"phone_id": phone_id})
+        return Response(status_code=204)
 
     @app.get("/api/v1/metrics")
     async def api_metrics(p: Principal = Depends(authed("metrics:read"))):
