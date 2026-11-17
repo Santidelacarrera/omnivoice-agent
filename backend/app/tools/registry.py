@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.core.config import get_settings
 from app.observability.metrics import ERRORS, TOOL_DURATION
@@ -51,6 +51,43 @@ class CreateReservationArgs(ToolArgs):
         return v
 
 
+class ModifyReservationArgs(ToolArgs):
+    reservation_id: str = Field(pattern=r"^[A-Z0-9-]{4,20}$")
+    name: str = Field(min_length=1, max_length=80, description="Nombre con el que se hizo la reserva (verificación de identidad)")
+    new_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    new_time: str | None = Field(default=None, pattern=r"^\d{2}:\d{2}$")
+    new_party_size: int | None = Field(default=None, ge=1, le=20)
+
+    @field_validator("new_date")
+    @classmethod
+    def _real_date(cls, v: str | None) -> str | None:
+        if v is not None:
+            datetime.date.fromisoformat(v)
+        return v
+
+    @field_validator("new_time")
+    @classmethod
+    def _real_time(cls, v: str | None) -> str | None:
+        if v is not None:
+            datetime.time.fromisoformat(v)
+        return v
+
+    @model_validator(mode="after")
+    def _something_changes(self) -> "ModifyReservationArgs":
+        if self.new_date is None and self.new_time is None and self.new_party_size is None:
+            raise ValueError("indica qué cambia: new_date, new_time o new_party_size")
+        return self
+
+
+class CancelReservationArgs(ToolArgs):
+    reservation_id: str = Field(pattern=r"^[A-Z0-9-]{4,20}$")
+    name: str = Field(min_length=1, max_length=80, description="Nombre con el que se hizo la reserva (verificación de identidad)")
+
+
+class EndCallArgs(ToolArgs):
+    reason: str = Field(default="completada", min_length=2, max_length=120)
+
+
 class CreateTicketArgs(ToolArgs):
     subject: str = Field(min_length=3, max_length=140)
     description: str = Field(min_length=3, max_length=2000)
@@ -76,6 +113,7 @@ class Tool:
     permission: str
     handler: Handler
     mutating: bool = False
+    needs_confirmation: bool = False  # el servidor exige que el usuario confirme de viva voz antes de ejecutar
 
     def schema(self) -> dict[str, Any]:
         return {
@@ -90,6 +128,9 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
         self._idempotency: dict[str, dict[str, Any]] = {}
+
+    def get(self, name: str) -> "Tool | None":
+        return self._tools.get(name)
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool

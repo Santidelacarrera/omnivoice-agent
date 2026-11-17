@@ -376,6 +376,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                                                voice=(agent or {}).get("voice"),
                                                language=(agent or {}).get("language") or s.telephony_language),
                         transfer_handler=lambda reason, sid=call_sid, o=org_id: _transfer(sid, o, reason, _context(o, sid)),
+                        end_handler=lambda sid=call_sid: _hangup_by_agent(sid),
                     )
                     live[session_key] = session
                     if call_sid:
@@ -406,6 +407,10 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                 await asyncio.shield(session.close())
             elif principal is not None:
                 await app.state.store.release_session(principal.org_id, session_key)
+
+    async def _hangup_by_agent(call_sid: str) -> None:
+        if call_sid:
+            await client.hangup(call_sid)
 
     def _context(org_id: str, call_sid: str) -> list[tuple[str, str]]:
         sess = by_call.get((org_id, call_sid))

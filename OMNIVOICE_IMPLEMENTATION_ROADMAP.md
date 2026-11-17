@@ -33,8 +33,10 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] Pendiente: evaluaciones automáticas de calidad conversacional (conjuntos de casos con resultados esperados) y medir tasa de alucinación; el simulador hoy es manual.
 
 ## ETAPA 5 — Herramientas
-- [ ] Modificar/cancelar reserva, clientes, confirmaciones, finalizar/transferir llamada.
-- [ ] Confirmación explícita en acciones sensibles.
+- [x] Herramientas `modify_reservation`, `cancel_reservation` (verifican el nombre de la reserva; cancelar conserva la fila; migración 010) y `end_call` (el agente cuelga tras despedirse). `transfer_to_human` ya existía.
+- [ ] Pendiente: consultar/registrar clientes, enviar confirmaciones (SMS/WhatsApp/email) y consultar pedidos; requieren integraciones y tablas que aún no existen.
+- [x] Confirmación explícita aplicada por el servidor (`Tool.needs_confirmation`): la acción solo se ejecuta si, tras pedirla, el agente habló y el usuario terminó de hablar, con argumentos idénticos y de un solo uso. El simulador la aplica igual.
+- [ ] Limitación conocida: el servidor verifica que el usuario respondió, no el contenido de su respuesta (un «no» también habilita el reintento). Mitigación posible: confirmación por segundo canal o clasificación de la respuesta.
 
 ## ETAPA 6 — Panel SaaS
 - [ ] Asistente de 9 pasos, números, llamadas en vivo, equipo, auditoría; Playwright.

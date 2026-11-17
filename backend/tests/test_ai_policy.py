@@ -176,3 +176,22 @@ def test_llm_failure_is_not_leaked():
     c = sim_client(Broken())
     r = c.post(f"/api/v1/agents/{agent(c)['id']}/simulate", json={"turns": ["hola"]}, headers=h())
     assert r.status_code == 502 and "SECRETA" not in r.text
+
+
+def test_simulator_enforces_confirmation_like_a_real_call():
+    call = {"type": "tool_use", "id": "t", "name": "create_reservation", "input": {"name": "Ana", "date": "2030-01-07", "time": "20:00", "party_size": 2}}
+    llm = ScriptedLLM([[call], [{"type": "text", "text": "¿Confirma la reserva para 2 el 7 a las 20:00?"}],  # turno 1: pide confirmar
+                       [{**call, "id": "t2"}], [{"type": "text", "text": "Listo."}]])  # turno 2: el usuario dijo sí, repite
+    c = sim_client(llm)
+    out = c.post(f"/api/v1/agents/{agent(c)['id']}/simulate", json={"turns": ["Reserva para dos", "Sí, confírmala"]}, headers=h()).json()
+    assert [(t["tool"], t["ok"], t["error"]) for t in out["tools"]] == [
+        ("create_reservation", False, "confirmacion_requerida"), ("create_reservation", True, None)]
+    assert not c.app.state.repo.reservations  # el sandbox no es la base real
+
+
+def test_simulator_refuses_to_execute_without_a_new_user_message():
+    call = {"type": "tool_use", "id": "t", "name": "create_reservation", "input": {"name": "Ana", "date": "2030-01-07", "time": "20:00", "party_size": 2}}
+    llm = ScriptedLLM([[call], [{**call, "id": "t2"}], [{"type": "text", "text": "ok"}]])  # insiste en el mismo turno
+    c = sim_client(llm)
+    out = c.post(f"/api/v1/agents/{agent(c)['id']}/simulate", json={"turns": ["Reserva para dos"]}, headers=h()).json()
+    assert [t["ok"] for t in out["tools"]] == [False, False]

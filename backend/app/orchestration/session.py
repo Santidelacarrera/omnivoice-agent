@@ -61,6 +61,7 @@ class VoiceSession:
         recording_storage: Any = None,
         recording_allowed: bool = False,
         transfer_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
+        end_handler: Callable[[], Awaitable[None]] | None = None,
         provider_factory: Callable[[], RealtimeProvider] | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
@@ -78,6 +79,7 @@ class VoiceSession:
         self.recording_storage = recording_storage
         # Derivación efectiva a un humano (p. ej. telefonía). Sin handler, `transfer_to_human` solo deja constancia.
         self.transfer_handler = transfer_handler
+        self.end_handler = end_handler  # cuelga/cierra cuando el agente usa `end_call` (telefonía)
         # Se graba solo con las tres condiciones: almacenamiento configurado, política de la organización y consentimiento.
         self.recorder: StereoRecorder | None = (
             StereoRecorder(settings.sample_rate, settings.max_session_seconds)
@@ -104,12 +106,25 @@ class VoiceSession:
         self._usage_carry: dict[str, float] = {}
         self._audio_out_bytes = 0
         self._full_instructions = ""
+        # Confirmación exigida por el servidor: clave de la llamada → fase (0 pedida, 1 el agente habló, 2 el usuario respondió).
+        self._pending_confirm: dict[str, int] = {}
         self.cost_usd: float | None = None
         self._stages: dict[str, float] = {}
 
     def recent_context(self) -> list[tuple[str, str]]:
         """Últimos intercambios (solo en memoria) para el traspaso a un operador."""
         return list(self._recent)
+
+    async def _end_after_goodbye(self) -> None:
+        """El agente terminó: deja que acabe de despedirse y avisa al cliente / cuelga la llamada."""
+        await asyncio.sleep(self.settings.transfer_announce_ms / 1000)
+        await self.send({"type": "call.end"})
+        await self._audit("call.ended_by_agent")
+        if self.end_handler:
+            try:
+                await self.end_handler()
+            except Exception:  # noqa: BLE001
+                log.exception("end_handler_failed", session=self.id)
 
     async def _audit(self, action: str, detail: dict[str, Any] | None = None) -> None:
         d = {"session_id": self.id, "correlation_id": self.correlation_id, **(detail or {})}
@@ -167,6 +182,7 @@ class VoiceSession:
             await self.handle_barge_in()
         elif event == "speech_end":
             self._set(State.PROCESSING)
+            self._advance_confirmations(user_spoke=True)
         if self._provider_failed or self._recovering:
             return  # reconectando: el audio de ese intervalo se descarta (no se acumula sin límite)
         try:
@@ -300,6 +316,7 @@ class VoiceSession:
                 await self.send({"type": "metrics", "first_audio_ms": self.first_audio_ms, **self._stages})
                 self._stages = {}
             self._audio_out_bytes += len(ev["audio"])
+            self._advance_confirmations(user_spoke=False)
             await self.send(ev["audio"])
             if self.recorder:
                 self.recorder.add_agent(ev["audio"])
@@ -416,11 +433,38 @@ class VoiceSession:
             return
         await self._fail_terminal(where)
 
+    # ---------- confirmación explícita (servidor) ----------
+    def _advance_confirmations(self, user_spoke: bool) -> None:
+        """Una confirmación pendiente avanza solo con la secuencia real: el agente habla (lee los datos) y DESPUÉS el usuario termina de hablar."""
+        for key, phase in self._pending_confirm.items():
+            if not user_spoke and phase == 0:
+                self._pending_confirm[key] = 1
+            elif user_spoke and phase == 1:
+                self._pending_confirm[key] = 2
+
+    def _confirmation_gate(self, ev: dict[str, Any]) -> dict[str, Any] | None:
+        """Devuelve un resultado de rechazo si la acción aún no fue confirmada por el usuario; None si puede ejecutarse."""
+        tool = self.registry.get(ev["name"])
+        if tool is None or not tool.needs_confirmation or (self.allowed_tools is not None and ev["name"] not in self.allowed_tools):
+            return None  # una herramienta no permitida la rechaza el registro, no se pide confirmar algo que no se puede hacer
+        try:
+            raw = json.loads(ev["arguments"]) if isinstance(ev["arguments"], str) else ev["arguments"]
+            key = ev["name"] + ":" + json.dumps(raw, sort_keys=True, ensure_ascii=False)
+        except Exception:  # noqa: BLE001 - argumentos ilegibles: que los rechace la validación normal
+            return None
+        if self._pending_confirm.get(key) == 2:
+            del self._pending_confirm[key]
+            return None
+        self._pending_confirm.setdefault(key, 0)
+        ERRORS.labels("confirmation_required").inc()
+        return {"ok": False, "error": "confirmacion_requerida",
+                "detail": "Lee los datos al usuario, espera su respuesta y, solo si confirma, repite la llamada idéntica."}
+
     async def _run_tool(self, ev: dict[str, Any], epoch: int) -> None:
         self._set(State.TOOL_RUNNING)
         await self.send({"type": "tool.start", "name": ev["name"]})
         started = time.monotonic()
-        result = await self.registry.execute(
+        result = self._confirmation_gate(ev) or await self.registry.execute(
             ev["name"], ev["arguments"], self.principal, ev["call_id"], self.allowed_tools
         )
         duration_ms = round((time.monotonic() - started) * 1000)
@@ -435,6 +479,8 @@ class VoiceSession:
             "tool": ev["name"], "call_id": ev["call_id"], "args": {"keys": arg_keys},
             "result": {"ok": result.get("ok"), "error": result.get("error")},
             "ok": result.get("ok"), "duration_ms": duration_ms})
+        if ev["name"] == "end_call" and result.get("ok"):
+            self._spawn(self._end_after_goodbye())
         if ev["name"] == "transfer_to_human" and result.get("ok") and self.transfer_handler:
             reason = str((result.get("data") or {}).get("reason", ""))
             try:

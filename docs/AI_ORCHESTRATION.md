@@ -21,3 +21,13 @@ Las reglas van primero y declaran que prevalecen. **Es una defensa en el prompt,
 - Usa las mismas reglas, modelo y herramientas que una llamada, pero las herramientas corren sobre un **repositorio de demostración en memoria**: no lee ni cambia datos reales. Evalúa el comportamiento del agente, no sus datos.
 - No guarda las frases de prueba; la auditoría registra solo cuántos turnos y tokens se usaron.
 - Cada simulación consume el modelo (coste): el límite por minuto es la protección básica.
+
+## Confirmación explícita de acciones
+Las herramientas que cambian datos del cliente (`create_reservation`, `modify_reservation`, `cancel_reservation`) llevan `needs_confirmation`. El servidor (no el modelo) lo impone en `VoiceSession._confirmation_gate`:
+1. La primera llamada **no se ejecuta**: devuelve `confirmacion_requerida`.
+2. El agente debe leer los datos al usuario (el servidor espera a oír audio del agente después de la petición).
+3. El usuario debe terminar de hablar después de eso (fin de habla detectado por el VAD, independiente del proveedor de voz).
+4. Solo entonces se acepta la **misma llamada con argumentos idénticos**, una única vez; cualquier cambio de datos vuelve a pedir confirmación.
+
+**Límite honesto:** se comprueba que el usuario *respondió*, no *qué* respondió: un «no» también habilita el reintento, y la regla 2 del prompt es lo que pide al modelo no reintentar. Es una barrera contra ejecuciones sin diálogo, no una verificación semántica.
+`modify`/`cancel` exigen además el **nombre** con el que se hizo la reserva (conocer el código no basta) y no revelan si un código existe. `end_call` cierra la conversación tras la despedida (en telefonía cuelga la llamada).

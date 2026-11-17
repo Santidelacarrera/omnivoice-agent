@@ -54,10 +54,13 @@ async def simulate(settings: Settings, llm: Any, agent: dict[str, Any], org_id: 
     tool_log: list[dict[str, Any]] = []
     usage = {"in": 0, "out": 0}
     call_n = 0
+    turn_n = 0
+    pending: dict[str, int] = {}  # confirmación exigida: la acción se ejecuta si llega un mensaje de usuario tras pedirla
 
     async def run() -> None:
-        nonlocal call_n
+        nonlocal call_n, turn_n
         for user_text in turns:
+            turn_n += 1
             messages.append({"role": "user", "content": user_text})
             transcript.append({"role": "user", "text": user_text})
             for _ in range(MAX_TOOL_ROUNDS + 1):
@@ -81,7 +84,16 @@ async def simulate(settings: Settings, llm: Any, agent: dict[str, Any], org_id: 
                 results = []
                 for tu in tool_uses:
                     call_n += 1
-                    out = await registry.execute(tu["name"], tu["input"], principal, f"sim-{call_n}", allowed)
+                    tool = registry.get(tu["name"])
+                    key = tu["name"] + ":" + json.dumps(tu["input"], sort_keys=True, ensure_ascii=False)
+                    permitted = allowed is None or tu["name"] in allowed
+                    if tool is not None and permitted and tool.needs_confirmation and not (key in pending and turn_n > pending[key]):
+                        pending.setdefault(key, turn_n)
+                        out = {"ok": False, "error": "confirmacion_requerida",
+                               "detail": "Lee los datos al usuario, espera su respuesta y, solo si confirma, repite la llamada idéntica."}
+                    else:
+                        pending.pop(key, None)
+                        out = await registry.execute(tu["name"], tu["input"], principal, f"sim-{call_n}", allowed)
                     tool_log.append({"tool": tu["name"], "ok": bool(out.get("ok")), "error": out.get("error")})
                     results.append({"type": "tool_result", "tool_use_id": tu["id"], "content": json.dumps(out, ensure_ascii=False)})
                 messages.append({"role": "user", "content": results})
