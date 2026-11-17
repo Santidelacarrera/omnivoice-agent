@@ -19,6 +19,14 @@ BODY = {"name": "Recepción", "instructions": "Atiende llamadas de la clínica c
 SECRET_TEXT = "mi rut es 12.345.678-9"
 
 
+def live(*a, **k):
+    """Cliente con bucle de eventos persistente: sin `with`, cada petición crea y cierra su propio bucle y las tareas de fondo
+    (la redirección diferida al operador) se cancelan al terminar la petición, como pasaba en CI."""
+    c, tw = make(*a, **k)
+    c.__enter__()
+    return c, tw
+
+
 def h(org=ORG, role="admin"):
     return {"Authorization": f"Bearer {issue_token('u', org, role)}"}
 
@@ -81,7 +89,7 @@ def test_agent_transfer_whispers_context_to_operator_once_and_does_not_store_it(
     prov = FakeProvider(script=[{"type": "transcript_user", "text": SECRET_TEXT},
                                 {"type": "tool_call", "name": "transfer_to_human", "call_id": "c1",
                                  "arguments": json.dumps({"reason": "cliente pide humano"})}], respond_on_audio=True)
-    c, tw = make(prov)
+    c, tw = live(prov)
     setup(c)
     cm, ws = open_call(c)
     frame = base64.b64encode(ulaw_encode(sine(8000, 20))).decode()
@@ -108,7 +116,7 @@ def test_agent_transfer_whispers_context_to_operator_once_and_does_not_store_it(
 
 
 def test_whisper_rejects_bad_signature():
-    c, _ = make()
+    c, _ = live()
     assert post_whisper(c, "x", sig="falsa").status_code == 403
 
 
@@ -120,7 +128,7 @@ def connected_call(c, **kw):
 
 
 def test_api_transfer_uses_live_context_and_is_not_repeatable():
-    c, tw = make(FakeProvider(respond_on_audio=True, script=[{"type": "transcript_user", "text": "necesito hablar con alguien"}]))
+    c, tw = live(FakeProvider(respond_on_audio=True, script=[{"type": "transcript_user", "text": "necesito hablar con alguien"}]))
     setup(c)
     cm, ws, cid = connected_call(c)
     frame = base64.b64encode(ulaw_encode(sine(8000, 20))).decode()
@@ -137,7 +145,7 @@ def test_api_transfer_uses_live_context_and_is_not_repeatable():
 
 
 def test_api_transfer_unavailable_without_operator_number_and_unknown_calls():
-    c, tw = make(human_transfer_number="")
+    c, tw = live(human_transfer_number="")
     setup(c)
     cm, ws, cid = connected_call(c)
     assert c.post(f"/api/v1/calls/{cid}/transfer", json={}, headers=h()).status_code == 409 and not tw.redirects
@@ -149,7 +157,7 @@ def test_api_transfer_unavailable_without_operator_number_and_unknown_calls():
 
 
 def test_api_cannot_transfer_before_answer_but_can_cancel_outbound():
-    c, tw = make()
+    c, tw = live()
     setup(c)
     assert c.post("/api/v1/telephony/calls", json={"to": "+34622222222", "consent_basis": "existing_customer"}, headers=h()).status_code == 202
     cid = c.get("/api/v1/calls", headers=h()).json()["items"][0]["id"]
@@ -163,7 +171,7 @@ def test_api_cannot_transfer_before_answer_but_can_cancel_outbound():
 
 
 def test_api_end_connected_call_completes_it():
-    c, tw = make(FakeProvider(respond_on_audio=True, script=[{"type": "transcript_agent", "text": "hola"}]))
+    c, tw = live(FakeProvider(respond_on_audio=True, script=[{"type": "transcript_agent", "text": "hola"}]))
     setup(c)
     cm, ws, cid = connected_call(c)
     assert c.post(f"/api/v1/calls/{cid}/end", headers=h()).status_code == 202
