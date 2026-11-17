@@ -39,7 +39,8 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] Limitación conocida: el servidor verifica que el usuario respondió, no el contenido de su respuesta (un «no» también habilita el reintento). Mitigación posible: confirmación por segundo canal o clasificación de la respuesta.
 
 ## ETAPA 6 — Panel SaaS
-- [ ] Asistente de 9 pasos, números, llamadas en vivo, equipo, auditoría; Playwright.
+- [x] Páginas de **Llamadas** (lista, eventos, transferir y finalizar), **Números** (alta, agente, operador por línea) y analítica de 30 días en el **Panel**. Verificadas con typecheck, build y carga real contra el backend; sin pruebas automatizadas de interfaz.
+- [ ] Pendiente: asistente de 9 pasos para crear agentes, salientes y lista de exclusión, claves de API, webhooks, equipo, facturación, diseño responsive revisado y accesibilidad auditada, Playwright. La autenticación del panel sigue siendo el token de desarrollo: hace falta el flujo de identidad real antes de producción.
 
 ## ETAPA 7 — Conocimiento
 - [ ] Ingesta PDF/DOCX/TXT/CSV, fragmentos, embeddings (pgvector), citas, versionado.
@@ -52,8 +53,11 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] `subscriptions`, `invoices`, cuotas por plan, margen por organización, Grafana, OpenTelemetry, Sentry.
 
 ## ETAPA 10 — API pública y webhooks
-- [ ] `/calls`, `/usage`, `/analytics`, webhooks firmados, SDK y documentación.
+- [x] `GET /api/v1/usage` y `GET /api/v1/analytics` (llamadas, atendidas, perdidas, transferencias, duración media, por día y por agente; agregados en SQL).
+- [x] Webhooks salientes firmados (HMAC-SHA256 con marca de tiempo), cola en la base de datos con reintentos (30 s, 2 min, 10 min, 1 h, 6 h), secreto cifrado en reposo y rotable, protección SSRF (solo https, solo IP públicas, comprobada al registrar y al enviar, conexión fijada a la IP validada, sin seguir redirecciones). Eventos: `call.started|completed|failed|transferred`, `tool.executed`, `webhook.test`. Migración 012.
+- [ ] Pendiente: `POST /api/v1/calls` (alias de salientes), evento de alerta de consumo (necesita cuotas por plan, Etapa 9), SDK y ejemplos de integración, (la purga de entregas a los 14 días y la desactivación automática tras 10 fallos seguidos ya están hechas, migración 013).
 
 ## ETAPA 11–13
 - [ ] Carga y recuperación; staging/producción con aprobación; piloto con 3–5 clínicas.
-- [ ] Documentos faltantes: API_DOCUMENTATION, DATABASE_SCHEMA, SECURITY, TESTING, BILLING, CONTRIBUTING, CHANGELOG.
+- [x] Documentos: API_DOCUMENTATION, DATABASE_SCHEMA, SECURITY, TESTING, TELEPHONY_INTEGRATION, AI_ORCHESTRATION, CONTRIBUTING, CHANGELOG.
+- [ ] Faltan: BILLING (no hay facturación todavía), TECHNICAL_SPECIFICATION y DEPLOYMENT dedicado (hoy en RUNBOOK y README).

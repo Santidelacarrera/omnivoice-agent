@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { api, MetricsResponse, Percentiles } from "@/lib/api";
+import { Analytics, api, MetricsResponse, pct, Percentiles, secs } from "@/lib/api";
 
 const fmt = (v: number | null) => (v === null ? "—" : `${v} ms`);
 
@@ -21,18 +21,20 @@ function PercentileCard({ title, p, target }: { title: string; p: Percentiles; t
 export default function Dashboard() {
   const [m, setM] = useState<MetricsResponse | null>(null);
   const [audit, setAudit] = useState<{ ts: number; action: string; actor: string | null; detail: Record<string, unknown> }[]>([]);
+  const [an, setAn] = useState<Analytics | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     const tick = async () => {
       try {
-        const [metrics, logs] = await Promise.all([
+        const [metrics, logs, analytics] = await Promise.all([
           api<MetricsResponse>("/api/v1/metrics", "admin"),
           api<{ items: typeof audit }>("/api/v1/audit-logs?limit=25", "admin"),
+          api<Analytics>("/api/v1/analytics?days=30", "admin"),
         ]);
         if (!alive) return;
-        setM(metrics); setAudit(logs.items); setErr(null);
+        setM(metrics); setAudit(logs.items); setAn(analytics); setErr(null);
       } catch (e) { if (alive) setErr((e as Error).message); }
     };
     tick();
@@ -44,6 +46,18 @@ export default function Dashboard() {
     <main className="mx-auto max-w-5xl space-y-6 p-6">
       <h1 className="text-2xl font-semibold">Panel de administración</h1>
       {err && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-700">{err}</p>}
+      {an && (
+        <section aria-label="Llamadas de los últimos 30 días" className="space-y-2">
+          <h2 className="text-lg font-medium">Llamadas (30 días)</h2>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Total</div><div className="text-2xl">{an.calls.total}</div></div>
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Atendidas</div><div className="text-2xl">{pct(an.rates.answer_rate)}</div></div>
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Perdidas</div><div className="text-2xl">{an.calls.missed}</div></div>
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Transferidas</div><div className="text-2xl">{an.calls.transferred}</div></div>
+            <div className="rounded border p-4"><div className="text-xs text-slate-500">Duración media</div><div className="text-2xl">{secs(an.calls.avg_duration_s)}</div></div>
+          </div>
+        </section>
+      )}
       {m && (
         <>
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
