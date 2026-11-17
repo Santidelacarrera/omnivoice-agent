@@ -205,3 +205,14 @@ def test_admin_can_erase_a_conversation_and_others_cannot():
 def test_malformed_conversation_id_is_404():
     c = make_client()
     assert c.get("/api/v1/conversations/no-es-uuid", headers=auth("admin")).status_code == 404
+
+
+def test_cors_preflight_allows_the_methods_the_panel_uses():
+    """El panel usa PATCH, PUT y DELETE desde el navegador: si el preflight no los permite, esas acciones fallan en silencio."""
+    c = make_client(cors_origins=["http://localhost:3000"])
+    for method in ("GET", "POST", "PATCH", "PUT", "DELETE"):
+        r = c.options("/api/v1/agents", headers={"Origin": "http://localhost:3000", "Access-Control-Request-Method": method,
+                                                  "Access-Control-Request-Headers": "authorization,content-type"})
+        assert r.status_code == 200 and method in r.headers["access-control-allow-methods"], method
+    bad = c.options("/api/v1/agents", headers={"Origin": "http://evil.example.com", "Access-Control-Request-Method": "DELETE"})
+    assert "access-control-allow-origin" not in bad.headers

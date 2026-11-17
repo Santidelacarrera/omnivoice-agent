@@ -205,7 +205,7 @@ def create_app(
     app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
     registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
 
-    app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST"],
+    app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
                        allow_headers=["Authorization", "Content-Type"], allow_credentials=True)
 
     @app.middleware("http")
