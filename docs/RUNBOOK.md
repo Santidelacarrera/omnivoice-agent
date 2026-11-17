@@ -79,3 +79,11 @@ Cada llamada se asigna por el número marcado (`To`; en salientes, `From`) usand
 - Solo contesta un agente **publicado** (`POST /api/v1/agents/{id}/publish`). Borrador, archivado o número sin agente → mensaje y colgado, con `telephony.call_rejected` en auditoría.
 - Número sin asignar: por defecto usa `TELEPHONY_ORG_ID`/`TELEPHONY_AGENT_ID` (compatibilidad). En producción multi-cliente pon `TELEPHONY_ALLOW_UNMAPPED=false` para rechazarlos.
 - La búsqueda usa la función `resolve_phone_number` (migración 006, `SECURITY DEFINER`): su dueño debe ser el rol de migraciones, que no está sujeto a RLS (en la imagen oficial de PostgreSQL lo es). No lista números: solo resuelve uno exacto.
+
+## Estados de llamada
+Cada llamada es una fila en `calls` (única por proveedor + `CallSid`) con su historial en `call_events`. Estados: CREATED, QUEUED, RINGING, ANSWERED, CONNECTED, COMPLETED, FAILED, BUSY, NO_ANSWER, CANCELLED, TRANSFERRED.
+- El estado solo avanza; un evento tardío o repetido se guarda (`applied=false`) pero no retrocede ni duplica nada. Un estado final no cambia.
+- Consulta: `GET /api/v1/calls` y `GET /api/v1/calls/{id}` (con eventos). El interlocutor aparece solo como hash.
+- Salientes: la plataforma pide a Twilio los avisos de estado en `POST /telephony/status`. **Entrantes:** configura en el número de Twilio *Status Callback URL* = `<TELEPHONY_PUBLIC_URL>/telephony/status` (método POST); sin eso solo se registran los hitos propios (CONNECTED/COMPLETED/TRANSFERRED).
+- Una segunda entrega del webhook de una llamada ya conectada o terminada se rechaza (`telephony.call_duplicate`).
+- Métrica: `omnivoice_call_events_total{status,outcome}` con `outcome` = applied | ignored | duplicate.

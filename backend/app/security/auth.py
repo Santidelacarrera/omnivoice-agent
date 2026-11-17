@@ -10,8 +10,7 @@ from app.core.config import get_settings
 
 bearer = HTTPBearer(auto_error=False)
 
-_READ = {"agents:read", "conversations:read", "metrics:read"}
-_READ = {"agents:read", "conversations:read", "metrics:read"}
+_READ = {"agents:read", "conversations:read", "metrics:read", "calls:read"}
 _FULL = {*_READ, "conversations:delete", "agents:write", "agents:publish", "audit:read", "session:create",
          "recordings:read", "telephony:call", "phones:read", "phones:write"}
 ROLE_PERMISSIONS: dict[str, set[str]] = {

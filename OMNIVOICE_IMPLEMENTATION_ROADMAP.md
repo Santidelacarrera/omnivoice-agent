@@ -18,7 +18,8 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 ## ETAPA 3 — Telefonía
 - [x] Usar `phone_numbers` en `/telephony/voice` para resolver organización y agente; solo atiende un agente `published` (borrador, archivado o sin agente → mensaje y colgado, con auditoría). Función `resolve_phone_number` (migración 006, SECURITY DEFINER, solo búsqueda exacta). `TELEPHONY_ALLOW_UNMAPPED=false` rechaza números sin asignar.
 - [ ] Pendiente de esta línea: el número de origen de las llamadas salientes (`TWILIO_FROM_NUMBER`) sigue siendo global; debe salir del número de la organización.
-- [ ] Interfaz `TelephonyProvider` + tabla `calls`/`call_events`; estados CREATED…TRANSFERRED; idempotencia por `CallSid`+evento.
+- [x] Tablas `calls`/`call_events` (migración 007, RLS, eventos solo-anexar), estados CREATED…TRANSFERRED con transiciones solo hacia adelante, idempotencia por `(proveedor, CallSid)` y por evento, `POST /telephony/status` firmado, `GET /api/v1/calls[/{id}]`, métrica `omnivoice_call_events_total`, rechazo de entregas duplicadas de una llamada ya atendida.
+- [ ] Pendiente: interfaz `TelephonyProvider` (abstracción multi-proveedor; hoy el código conoce Twilio) y configurar el Status Callback en el número para entrantes (Twilio solo lo envía si está configurado en la consola/número).
 - [ ] Transferencia a humano con contexto; `POST /calls/{id}/transfer|end`; llamadas salientes con horarios, reintentos y consentimiento.
 - [ ] Evaluar SIP directo (verificar condiciones del proveedor antes).
 

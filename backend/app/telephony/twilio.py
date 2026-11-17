@@ -50,9 +50,10 @@ class TwilioClient:
         self._base = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}"
 
     async def create_call(self, to: str, from_: str, twiml_url: str, status_callback: str | None = None) -> dict[str, Any]:
-        data = {"To": to, "From": from_, "Url": twiml_url, "Method": "POST"}
+        data: dict[str, Any] = {"To": to, "From": from_, "Url": twiml_url, "Method": "POST"}
         if status_callback:
             data["StatusCallback"] = status_callback
+            data["StatusCallbackEvent"] = ["initiated", "ringing", "answered", "completed"]
         r = await self._http.post(f"{self._base}/Calls.json", data=data, auth=self._auth)
         r.raise_for_status()
         return r.json()

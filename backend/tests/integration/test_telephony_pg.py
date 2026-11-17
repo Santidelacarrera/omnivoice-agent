@@ -33,7 +33,7 @@ def _h(org):
 
 
 def _call(c, to):
-    params = {"CallSid": "CA1", "From": "+34600000000", "To": to}
+    params = {"CallSid": "CA" + uuid.uuid4().hex, "From": "+34600000000", "To": to}
     return c.post("/telephony/voice", content=urlencode(params), headers={
         "content-type": "application/x-www-form-urlencoded",
         "x-twilio-signature": compute_signature("tok", f"{PUBLIC}/telephony/voice", params)})

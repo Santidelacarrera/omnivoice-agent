@@ -10,6 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from app.database.engine import get_engine, org_transaction
 from app.observability.metrics import ERRORS
 from app.services.persistence import _VERSIONED, COST_PER_AUDIO_MINUTE_USD, PhoneNumberTaken
+from app.telephony.call_state import can_transition, is_terminal
 
 log = structlog.get_logger()
 
@@ -237,6 +238,79 @@ class PostgresPersistence:
         except IntegrityError as exc:
             raise PhoneNumberTaken(e164) from exc
         return {"id": pid, "e164": e164, "agent_id": agent_id}
+
+    @_safe
+    async def upsert_call(self, org_id, provider, sid, direction, agent_id, our_number, peer_hash):
+        async with org_transaction(org_id) as c:
+            row = (await c.execute(
+                text("INSERT INTO calls (org_id, provider, provider_call_sid, direction, agent_id, our_number, peer_hash) "
+                     "VALUES (:o, :p, :s, :d, :a, :n, :h) ON CONFLICT (provider, provider_call_sid) DO NOTHING "
+                     "RETURNING id, status"),
+                {"o": org_id, "p": provider, "s": sid, "d": direction, "a": agent_id, "n": our_number, "h": peer_hash})).first()
+            if row:
+                await c.execute(text("INSERT INTO call_events (call_id, org_id, status, event_key, applied) "
+                                     "VALUES (:c, :o, 'CREATED', 'created', true)"), {"c": row[0], "o": org_id})
+                return {"id": str(row[0]), "status": row[1], "created": True}
+            row = (await c.execute(text("SELECT id, status FROM calls WHERE provider = :p AND provider_call_sid = :s AND org_id = :o"),
+                                   {"p": provider, "s": sid, "o": org_id})).first()
+        return {"id": str(row[0]), "status": row[1], "created": False} if row else None
+
+    @_safe
+    async def apply_call_event(self, org_id, provider, sid, status, event_key, detail):
+        async with org_transaction(org_id) as c:
+            call = (await c.execute(
+                text("SELECT id, status FROM calls WHERE provider = :p AND provider_call_sid = :s AND org_id = :o FOR UPDATE"),
+                {"p": provider, "s": sid, "o": org_id})).first()
+            if not call:
+                return None
+            cid, current = call
+            applied = can_transition(current, status)
+            ins = (await c.execute(
+                text("INSERT INTO call_events (call_id, org_id, status, event_key, applied, detail) "
+                     "VALUES (:c, :o, :st, :k, :ap, CAST(:d AS jsonb)) ON CONFLICT (call_id, event_key) DO NOTHING RETURNING id"),
+                {"c": cid, "o": org_id, "st": status, "k": event_key, "ap": applied, "d": json.dumps(detail)})).first()
+            if ins is None:
+                return {"call_id": str(cid), "status": current, "applied": False, "duplicate": True}
+            if applied:
+                await c.execute(
+                    text("UPDATE calls SET status = :st, "
+                         "answered_at = CASE WHEN :st IN ('ANSWERED','CONNECTED') THEN COALESCE(answered_at, now()) ELSE answered_at END, "
+                         "ended_at = CASE WHEN :term THEN now() ELSE ended_at END WHERE id = :c"),
+                    {"st": status, "term": is_terminal(status), "c": cid})
+        return {"call_id": str(cid), "status": status if applied else current, "applied": applied, "duplicate": False}
+
+    async def resolve_call_org(self, provider, sid):
+        try:
+            async with get_engine().connect() as c:
+                r = (await c.execute(text("SELECT resolve_call_org(:p, :s)"), {"p": provider, "s": sid})).scalar()
+            return str(r) if r else None
+        except Exception:  # noqa: BLE001 - sin seguimiento la llamada sigue funcionando
+            ERRORS.labels("persistence").inc()
+            log.exception("persistence_failed", op="resolve_call_org")
+            return None
+
+    @staticmethod
+    def _call_row(r):
+        return {"id": str(r["id"]), "provider": r["provider"], "sid": r["provider_call_sid"], "direction": r["direction"],
+                "agent_id": str(r["agent_id"]) if r["agent_id"] else None, "our_number": r["our_number"],
+                "peer_hash": r["peer_hash"], "status": r["status"], "created_at": r["created_at"].timestamp(),
+                "answered_at": r["answered_at"].timestamp() if r["answered_at"] else None,
+                "ended_at": r["ended_at"].timestamp() if r["ended_at"] else None}
+
+    async def list_calls(self, org_id, limit=50):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT * FROM calls WHERE org_id = :o ORDER BY created_at DESC LIMIT :l"),
+                                    {"o": org_id, "l": limit})).mappings().all()
+        return [self._call_row(r) for r in rows]
+
+    async def get_call(self, org_id, call_id):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT * FROM calls WHERE id = :i AND org_id = :o"), {"i": call_id, "o": org_id})).mappings().first()
+            if not r:
+                return None
+            ev = (await c.execute(text("SELECT status, event_key, applied, detail, ts FROM call_events WHERE call_id = :i ORDER BY id"),
+                                  {"i": call_id})).mappings().all()
+        return {**self._call_row(r), "events": [{**e, "ts": e["ts"].timestamp()} for e in ev]}
 
     async def resolve_phone_number(self, e164):
         """Búsqueda global por número vía la función SECURITY DEFINER de la migración 006 (no hay org todavía)."""

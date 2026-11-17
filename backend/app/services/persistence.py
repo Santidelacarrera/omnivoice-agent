@@ -9,6 +9,8 @@ from typing import Any, Protocol
 
 import structlog
 
+from app.telephony.call_state import ANSWERED, CONNECTED, CREATED, can_transition, is_terminal
+
 log = structlog.get_logger()
 
 # Coste estimado de audio por minuto (USD). Ajustar según el contrato con el proveedor.
@@ -50,6 +52,13 @@ class Persistence(Protocol):
     async def add_phone_number(self, org_id: str, e164: str, agent_id: str | None) -> dict[str, Any]: ...
     async def delete_phone_number(self, org_id: str, phone_id: str) -> bool: ...
     async def resolve_phone_number(self, e164: str) -> dict[str, Any] | None: ...
+    async def upsert_call(self, org_id: str, provider: str, sid: str, direction: str, agent_id: str | None,
+                          our_number: str | None, peer_hash: str | None) -> dict[str, Any] | None: ...
+    async def apply_call_event(self, org_id: str, provider: str, sid: str, status: str, event_key: str,
+                               detail: dict[str, Any]) -> dict[str, Any] | None: ...
+    async def resolve_call_org(self, provider: str, sid: str) -> str | None: ...
+    async def list_calls(self, org_id: str, limit: int = 50) -> list[dict[str, Any]]: ...
+    async def get_call(self, org_id: str, call_id: str) -> dict[str, Any] | None: ...
     async def org_policy(self, org_id: str) -> dict[str, Any]: ...
     async def set_conversation_options(self, org_id: str, conversation_id: str, *, recording_consent: bool,
                                        voice: str | None, language: str | None) -> None: ...
@@ -63,6 +72,8 @@ class InMemoryPersistence:
         self.agents: dict[str, dict[str, Any]] = {}
         self.agent_versions: dict[str, list[dict[str, Any]]] = {}
         self.phones: dict[str, dict[str, Any]] = {}
+        self.calls: dict[str, dict[str, Any]] = {}
+        self.call_events: list[dict[str, Any]] = []
         self.audits: list[dict[str, Any]] = []
         self.convs: dict[str, dict[str, Any]] = {}
         self.transcripts: dict[str, list[dict[str, Any]]] = {}
@@ -163,6 +174,55 @@ class InMemoryPersistence:
         pid = str(uuid.uuid4())
         self.phones[pid] = {"id": pid, "org_id": org_id, "e164": e164, "agent_id": agent_id}
         return dict(self.phones[pid])
+
+    async def upsert_call(self, org_id, provider, sid, direction, agent_id, our_number, peer_hash):
+        existing = next((c for c in self.calls.values() if c["provider"] == provider and c["sid"] == sid), None)
+        if existing:
+            return {"id": existing["id"], "status": existing["status"], "created": False}
+        cid = str(uuid.uuid4())
+        self.calls[cid] = {"id": cid, "org_id": org_id, "provider": provider, "sid": sid, "direction": direction,
+                           "agent_id": agent_id, "our_number": our_number, "peer_hash": peer_hash, "status": CREATED,
+                           "created_at": time.time(), "answered_at": None, "ended_at": None}
+        self.call_events.append({"call_id": cid, "org_id": org_id, "status": CREATED, "event_key": "created",
+                                 "applied": True, "detail": {}, "ts": time.time()})
+        return {"id": cid, "status": CREATED, "created": True}
+
+    async def apply_call_event(self, org_id, provider, sid, status, event_key, detail):
+        call = next((c for c in self.calls.values() if c["provider"] == provider and c["sid"] == sid and c["org_id"] == org_id), None)
+        if call is None:
+            return None
+        if any(e["call_id"] == call["id"] and e["event_key"] == event_key for e in self.call_events):
+            return {"call_id": call["id"], "status": call["status"], "applied": False, "duplicate": True}
+        applied = can_transition(call["status"], status)
+        if applied:
+            call["status"] = status
+            now = time.time()
+            if status in (ANSWERED, CONNECTED) and call["answered_at"] is None:
+                call["answered_at"] = now
+            if is_terminal(status):
+                call["ended_at"] = now
+        self.call_events.append({"call_id": call["id"], "org_id": org_id, "status": status, "event_key": event_key,
+                                 "applied": applied, "detail": dict(detail), "ts": time.time()})
+        return {"call_id": call["id"], "status": call["status"], "applied": applied, "duplicate": False}
+
+    async def resolve_call_org(self, provider, sid):
+        c = next((c for c in self.calls.values() if c["provider"] == provider and c["sid"] == sid), None)
+        return c["org_id"] if c else None
+
+    @staticmethod
+    def _public_call(c):
+        return {k: v for k, v in c.items() if k != "org_id"}
+
+    async def list_calls(self, org_id, limit=50):
+        rows = sorted((c for c in self.calls.values() if c["org_id"] == org_id), key=lambda c: c["created_at"], reverse=True)
+        return [self._public_call(c) for c in rows[:limit]]
+
+    async def get_call(self, org_id, call_id):
+        c = self.calls.get(call_id)
+        if not c or c["org_id"] != org_id:
+            return None
+        events = [{k: v for k, v in e.items() if k not in ("call_id", "org_id")} for e in self.call_events if e["call_id"] == call_id]
+        return {**self._public_call(c), "events": events}
 
     async def resolve_phone_number(self, e164):
         n = next((n for n in self.phones.values() if n["e164"] == e164), None)
