@@ -78,6 +78,7 @@ jobs:
         shell: bash
         env:
           TEST_DATABASE_URL: postgresql+asyncpg://omni_app:omni_app@localhost:5432/omnivoice
+          TEST_ADMIN_DATABASE_URL: postgresql+asyncpg://omni:omni@localhost:5432/omnivoice
           TEST_REDIS_URL: redis://localhost:6379/0
         run: |
           set -o pipefail
