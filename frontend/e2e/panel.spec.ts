@@ -181,3 +181,28 @@ test("conocimiento: sube un documento, lo encuentra con cita, lo reemplaza y lo 
   await page.getByRole("button", { name: "Eliminar" }).first().click();
   await expect(page.getByText("Aún no hay documentos.")).toBeVisible();
 });
+
+test("equipo: añade un miembro, cambia su rol, un admin no puede crear owners y se puede quitar", async ({ page }) => {
+  await page.goto("/team");
+  await expect(page.getByRole("heading", { name: "Equipo" })).toBeVisible();
+  const email = `e2e-${Date.now()}@example.com`;
+
+  await page.getByLabel("Email del miembro").fill(email);
+  await page.getByLabel("Rol", { exact: true }).selectOption("operator");
+  await page.getByRole("button", { name: "Añadir o actualizar" }).click();
+  await expect(page.getByRole("status")).toContainText(`${email}: rol operator`);
+  await expect(page.getByLabel(`Rol de ${email}`)).toHaveValue("operator");
+
+  await page.getByLabel(`Rol de ${email}`).selectOption("viewer");
+  await expect(page.getByRole("status")).toContainText("rol viewer");
+
+  // un admin no puede dar el rol owner: el servidor lo rechaza y el panel lo muestra
+  await page.getByLabel(`Rol de ${email}`).selectOption("owner");
+  await expect(page.locator("p[role=alert]")).toContainText("owner");
+  await expect(page.getByLabel(`Rol de ${email}`)).toHaveValue("viewer");
+
+  page.once("dialog", (d) => d.accept());
+  await page.locator("tr", { hasText: email }).getByRole("button", { name: "Quitar" }).click();
+  await expect(page.getByRole("status")).toContainText("eliminado");
+  await expect(page.locator("tr", { hasText: email })).toHaveCount(0);
+});
