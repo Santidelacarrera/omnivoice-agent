@@ -50,7 +50,7 @@ async def one_session(idx: int, rounds: int, barge: LatencyWindow, frames: list[
     await s.close()
 
 
-async def main(n: int, rounds: int) -> None:
+async def main(n: int, rounds: int) -> dict:
     settings = Settings(environment="test", sample_rate=24000, vad_backend="energy")
     registry = build_registry(InMemoryRepository())
     db = InMemoryPersistence()
@@ -59,16 +59,35 @@ async def main(n: int, rounds: int) -> None:
     await asyncio.gather(*(one_session(i, rounds, barge, frames, db, registry, settings) for i in range(n)))
     wall = time.perf_counter() - t0
     p = barge.percentiles(scale=1_000_000)
-    print(json.dumps({
+    result = {
         "sessions": n, "rounds_per_session": rounds, "wall_seconds": round(wall, 2),
         "barge_in_server_handling_us": p,
         "note": "Solo orquestador (proveedor simulado, sin red). No es latencia extremo a extremo.",
-    }, indent=2))
+    }
+    print(json.dumps(result, indent=2))
+    return result
+
+
+def check_thresholds(result: dict, max_barge_p95_us: float | None, max_wall_s: float | None) -> list[str]:
+    """Umbrales de regresión del orquestador. Sin muestras cuenta como incumplido: no se aprueba lo que no se midió."""
+    failures = []
+    p95 = result["barge_in_server_handling_us"].get("p95")
+    if max_barge_p95_us is not None and (p95 is None or p95 > max_barge_p95_us):
+        failures.append(f"barge-in p95 {p95} us > {max_barge_p95_us} us")
+    if max_wall_s is not None and result["wall_seconds"] > max_wall_s:
+        failures.append(f"tiempo total {result['wall_seconds']} s > {max_wall_s} s con {result['sessions']} sesiones")
+    return failures
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--sessions", type=int, default=200)
     ap.add_argument("--rounds", type=int, default=5)
+    ap.add_argument("--max-barge-p95-us", type=float, help="falla (exit 1) si el p95 de manejo del barge-in supera estos microsegundos")
+    ap.add_argument("--max-wall-seconds", type=float, help="falla si el conjunto tarda más de estos segundos")
     a = ap.parse_args()
-    asyncio.run(main(a.sessions, a.rounds))
+    res = asyncio.run(main(a.sessions, a.rounds))
+    problems = check_thresholds(res, a.max_barge_p95_us, a.max_wall_seconds)
+    for line in problems:
+        print(f"UMBRAL INCUMPLIDO: {line}")
+    raise SystemExit(1 if problems else 0)

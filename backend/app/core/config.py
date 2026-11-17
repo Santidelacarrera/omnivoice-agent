@@ -134,6 +134,8 @@ class Settings(BaseSettings):
     webhooks_max_per_org: int = 10
     webhook_disable_after_failures: int = 10  # entregas fallidas seguidas tras las que el endpoint se desactiva solo
     webhook_retention_days: int = 14  # las entregas terminadas (entregadas o fallidas) se purgan pasado este plazo
+    db_connect_timeout_s: float = 5.0  # plazo para conectar a PostgreSQL (y para obtener una conexión del pool)
+    db_command_timeout_s: float = 15.0  # plazo de cada consulta
     simulate_per_minute: int = 10  # simulaciones de agente por organización y minuto (cada una consume el modelo)
     transfer_allowed_prefixes: str = ""  # p. ej. "+56,+34": solo se permiten transferencias a números con estos prefijos; vacío = sin límite
     transfer_blocked_prefixes: str = ""  # prefijos excluidos aunque estén dentro de un prefijo permitido (rangos premium)

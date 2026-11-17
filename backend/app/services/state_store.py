@@ -9,6 +9,19 @@ from typing import Protocol
 from app.security.auth import Principal
 
 
+async def release_quietly(store, org_id: str, session_key: str) -> None:
+    """Libera el cupo de una sesión sin que un fallo del almacén rompa el cierre de la llamada.
+
+    Si Redis está caído el cupo no se libera ahora; no se pierde: las sesiones huérfanas caducan solas (`stale_after_s`), así que el
+    sistema se cura sin intervención. Se cuenta para la alerta de errores."""
+    try:
+        await store.release_session(org_id, session_key)
+    except Exception:  # noqa: BLE001
+        from app.observability.metrics import ERRORS
+
+        ERRORS.labels("state_store").inc()
+
+
 class StateStore(Protocol):
     async def put_ticket(self, ticket: str, p: Principal, ttl: int, agent_id: str | None = None) -> None: ...
     async def take_ticket(self, ticket: str) -> tuple[Principal, str | None] | None: ...

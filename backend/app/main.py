@@ -22,7 +22,7 @@ from app.security.auth import Principal, issue_token, require
 from app.services.persistence import ApiKeyPrefixTaken, InMemoryPersistence, Persistence, PhoneNumberTaken
 from app.services.recordings import RecordingStorage, build_storage
 from app.services.retention import InMemoryRetentionBackend, RetentionBackend, RetentionJob
-from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore
+from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore, release_quietly
 from app.tools.handlers import DEMO_ORG, InMemoryRepository, Repository, build_registry
 
 log = structlog.get_logger()
@@ -150,7 +150,10 @@ def create_app(
             from app.database.engine import init_engine
             from app.services.pg_persistence import PostgresPersistence
 
-            init_engine(s.database_url)
+            init_engine(s.database_url, s.db_connect_timeout_s, s.db_command_timeout_s)
+            from app.services.pg_persistence import BREAKER
+
+            BREAKER.success()  # cada arranque parte con el cortacircuitos cerrado
             app.state.db = PostgresPersistence()
             app.state.repo = repository or _postgres_repo()
         if store is None and s.state_backend == "redis":
@@ -240,6 +243,21 @@ def create_app(
     @app.get("/healthz")
     async def healthz():
         return {"status": "ok"}
+
+    # Caída de una dependencia (Redis o PostgreSQL): 503 claro y contado, nunca un 500 con traza. Las llamadas en curso no pasan por aquí.
+    from redis.exceptions import RedisError
+    from sqlalchemy.exc import InterfaceError, OperationalError
+
+    async def _dependency_down(_request, exc):
+        from fastapi.responses import JSONResponse
+
+        ERRORS.labels("dependency_down").inc()
+        log.warning("dependency_down", error=type(exc).__name__)
+        return JSONResponse({"detail": "Servicio temporalmente no disponible; inténtalo de nuevo en unos segundos"}, status_code=503,
+                            headers={"Retry-After": "5"})
+
+    for exc_type in (RedisError, ConnectionError, TimeoutError, OperationalError, InterfaceError):
+        app.add_exception_handler(exc_type, _dependency_down)
 
     @app.get("/readyz")
     async def readyz():
@@ -794,7 +812,7 @@ def create_app(
                 await app.state.store.add_usage(principal.org_id, time.monotonic() - sess.metrics.started_at)
             except Exception:  # noqa: BLE001
                 log.exception("usage_accounting_failed", session=sess.id)
-            await app.state.store.release_session(principal.org_id, session_key)
+            await release_quietly(app.state.store, principal.org_id, session_key)
 
         session: VoiceSession | None = None
         loop = asyncio.get_running_loop()
@@ -850,7 +868,7 @@ def create_app(
                 except Exception:  # noqa: BLE001
                     log.exception("session_close_failed", session=session.id)
             else:
-                await app.state.store.release_session(principal.org_id, session_key)
+                await release_quietly(app.state.store, principal.org_id, session_key)
 
     from app.telephony.routes import register_telephony
 

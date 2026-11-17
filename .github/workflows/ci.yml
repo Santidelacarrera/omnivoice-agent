@@ -27,7 +27,8 @@ jobs:
           if [ "${rc:-0}" != 0 ]; then tail -n 15 /tmp/pytest.out | while IFS= read -r l; do echo "::error::tail ${l:0:300}"; done; fi
           exit ${rc:-0}
       - name: Benchmark de humo del orquestador
-        run: python -m bench.orchestrator_bench --sessions 50 --rounds 3
+        # Umbrales holgados (el runner de CI es lento y ruidoso): detectan regresiones grandes, no microoptimizaciones.
+        run: python -m bench.orchestrator_bench --sessions 200 --rounds 3 --max-barge-p95-us 5000 --max-wall-seconds 60
   migrations:
     runs-on: ubuntu-latest
     services:

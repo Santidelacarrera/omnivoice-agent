@@ -1,6 +1,7 @@
 """Persistencia PostgreSQL (RLS por organización). Módulo aparte para que el modo en memoria
 no requiera SQLAlchemy ni asyncpg."""
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -22,11 +23,49 @@ from app.telephony.call_state import can_transition, is_terminal
 log = structlog.get_logger()
 
 
+class _Breaker:
+    """Cortacircuitos de la persistencia best-effort de una llamada.
+
+    Si la base de datos no responde, cada operación inline (guardar una frase, una herramienta) esperaría su plazo completo y la llamada
+    se quedaría trabada. Tras `threshold` fallos seguidos se «abre»: durante `window_s` las operaciones se omiten al instante (y se
+    cuentan), y pasado ese tiempo se deja pasar una de prueba; si funciona, se cierra y todo vuelve a guardarse."""
+
+    def __init__(self, threshold: int = 3, window_s: float = 15.0) -> None:
+        self.threshold, self.window_s = threshold, window_s
+        self.failures, self.opened_at = 0, None
+        self.clock = time.monotonic
+
+    def is_open(self) -> bool:
+        if self.opened_at is None:
+            return False
+        if self.clock() - self.opened_at >= self.window_s:
+            self.opened_at = self.clock()  # medio abierto: deja pasar una prueba y vuelve a cerrar la ventana
+            return False
+        return True
+
+    def success(self) -> None:
+        self.failures, self.opened_at = 0, None
+
+    def failure(self) -> None:
+        self.failures += 1
+        if self.failures >= self.threshold:
+            self.opened_at = self.clock()
+
+
+BREAKER = _Breaker()
+
+
 def _safe(fn):
     async def wrapper(*a, **k):
+        if BREAKER.is_open():
+            ERRORS.labels("persistence_skipped").inc()  # base caída: se omite sin esperar
+            return None
         try:
-            return await fn(*a, **k)
+            result = await fn(*a, **k)
+            BREAKER.success()
+            return result
         except Exception:  # noqa: BLE001 - persistir nunca debe tumbar la llamada
+            BREAKER.failure()
             ERRORS.labels("persistence").inc()
             log.exception("persistence_failed", op=fn.__name__)
             return None

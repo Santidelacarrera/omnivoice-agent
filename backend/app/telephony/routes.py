@@ -18,6 +18,7 @@ from app.core.config import Settings
 from app.observability.metrics import CALL_EVENTS, ERRORS
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.security.auth import Principal
+from app.services.state_store import release_quietly
 from app.telephony import call_state as cs
 from app.telephony import outbound as ob
 from app.telephony.codec import platform_to_telephony, telephony_to_platform
@@ -382,7 +383,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                         live.pop(session_key, None)
                         by_call.pop((org_id, call_sid), None)
                         await track(org_id, call_sid, cs.COMPLETED, "ws:close")
-                        await app.state.store.release_session(org_id, session_key)
+                        await release_quietly(app.state.store, org_id, session_key)
                         try:  # mismo consumo diario que las sesiones web
                             await app.state.store.add_usage(org_id, time.monotonic() - sess.metrics.started_at)
                         except Exception:  # noqa: BLE001
@@ -430,7 +431,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
             if session is not None:
                 await asyncio.shield(session.close())
             elif principal is not None:
-                await app.state.store.release_session(principal.org_id, session_key)
+                await release_quietly(app.state.store, principal.org_id, session_key)
 
     async def _hangup_by_agent(call_sid: str) -> None:
         if call_sid:
