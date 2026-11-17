@@ -89,6 +89,12 @@ export const CONSENT_LABELS: Record<string, string> = {
   transactional: "Comunicación transaccional",
 };
 
+export interface PlanInfo {
+  plan: string; name: string | null; enforced: boolean;
+  limits: Record<string, number | null>; percent: Record<string, number | null>;
+  usage: { minutes_month: number; agents: number; phone_numbers: number; outbound_today: number; kb_sources: number; estimated_cost_usd_month: number };
+}
+
 export const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v * 100)} %`);
 export const secs = (v: number | null) => (v === null ? "—" : v >= 60 ? `${Math.floor(v / 60)} min ${Math.round(v % 60)} s` : `${Math.round(v)} s`);
 

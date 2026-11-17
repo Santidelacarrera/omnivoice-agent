@@ -143,6 +143,9 @@ class Settings(BaseSettings):
     otel_service_name: str = "omnivoice-backend"
     kb_max_sources: int = 200  # documentos por organización
     kb_max_chunks: int = 20000  # fragmentos por organización (acota almacenamiento y coste de búsqueda)
+    plans_enforced: bool = False  # True = se rechaza lo que exceda el plan; False = solo se mide y se muestra
+    default_plan: str = "starter"
+    plan_limits_json: str = ""  # sobrescribe límites por plan, p. ej. {"starter": {"minutes_per_month": 100}}
     simulate_per_minute: int = 10  # simulaciones de agente por organización y minuto (cada una consume el modelo)
     transfer_allowed_prefixes: str = ""  # p. ej. "+56,+34": solo se permiten transferencias a números con estos prefijos; vacío = sin límite
     transfer_blocked_prefixes: str = ""  # prefijos excluidos aunque estén dentro de un prefijo permitido (rangos premium)

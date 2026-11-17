@@ -693,6 +693,15 @@ class PostgresPersistence:
                      "FROM usage_records WHERE org_id = :o"), {"o": org_id})).first()
         return {"audio_seconds": float(r.s), "estimated_cost_usd": float(r.c)}
 
+    async def org_plan(self, org_id):
+        async with org_transaction(org_id) as c:
+            return (await c.execute(text("SELECT plan FROM organizations WHERE id = :o"), {"o": org_id})).scalar()
+
+    async def count_outbound_jobs_since(self, org_id, since):
+        async with org_transaction(org_id) as c:
+            return int((await c.execute(text("SELECT count(*) FROM outbound_jobs WHERE org_id = :o AND created_at >= :s"),
+                                        {"o": org_id, "s": since})).scalar() or 0)
+
     async def usage_since(self, org_id, since):
         async with org_transaction(org_id) as c:
             r = (await c.execute(

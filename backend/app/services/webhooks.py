@@ -28,7 +28,7 @@ from app.security import netguard, secretbox
 
 log = structlog.get_logger()
 
-EVENT_TYPES = ("call.started", "call.completed", "call.failed", "call.transferred", "tool.executed", "webhook.test")
+EVENT_TYPES = ("call.started", "call.completed", "call.failed", "call.transferred", "tool.executed", "usage.alert", "webhook.test")
 BACKOFF_S = (30, 120, 600, 3600, 21600)  # espera tras el intento 1..5; el 6.º fallo agota la entrega
 MAX_ATTEMPTS = len(BACKOFF_S) + 1
 CLAIM_BATCH = 20

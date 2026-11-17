@@ -401,6 +401,37 @@
         "defaults": {},
         "overrides": []
       }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Operaciones rechazadas por plan",
+      "description": "Cuotas alcanzadas (minutos, agentes, números, llamadas salientes, documentos).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "omnivoice-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (metric) (increase(omnivoice_plan_blocked_total[1h]))",
+          "legendFormat": "{{metric}}",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "omnivoice-prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     }
   ],
   "templating": {

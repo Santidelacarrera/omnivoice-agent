@@ -14,6 +14,7 @@ import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.billing.plans import QuotaExceeded
 from app.core.config import Settings
 from app.observability.metrics import CALL_EVENTS, ERRORS
 from app.orchestration.session import SessionOptions, VoiceSession
@@ -120,6 +121,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
     dialer = Dialer(s, lambda: app.state.db, lambda: app.state.store, client,
                     public_url("/telephony/voice", "direction=outbound"), public_url("/telephony/status"), track)
     app.state.dialer = dialer
+    dialer.plans = app.state.plans
 
     @app.post("/telephony/voice")
     async def inbound_voice(request: Request):
@@ -157,6 +159,11 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
             return Response(hangup_twiml("Demasiados intentos. Inténtelo más tarde."), media_type="text/xml")
         if await app.state.store.active_sessions(org) >= s.max_sessions_per_org:
             return Response(hangup_twiml("Todas las líneas están ocupadas. Inténtelo más tarde."), media_type="text/xml")
+        try:
+            await app.state.plans.ensure_minutes(org)
+        except QuotaExceeded:
+            await app.state.db.audit(org, "telephony", "telephony.call_rejected", {"call_sid": call_sid, "reason": "plan_minutes_exhausted"})
+            return Response(hangup_twiml("Este servicio no está disponible por ahora."), media_type="text/xml")
         if call_sid:
             call = await app.state.db.upsert_call(org, "twilio", call_sid, "outbound" if outbound else "inbound",
                                                   agent_id or None, ours or None, caller_id_hash(who))
@@ -384,6 +391,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                         by_call.pop((org_id, call_sid), None)
                         await track(org_id, call_sid, cs.COMPLETED, "ws:close")
                         await release_quietly(app.state.store, org_id, session_key)
+                        await app.state.plans.maybe_alert(org_id)
                         try:  # mismo consumo diario que las sesiones web
                             await app.state.store.add_usage(org_id, time.monotonic() - sess.metrics.started_at)
                         except Exception:  # noqa: BLE001

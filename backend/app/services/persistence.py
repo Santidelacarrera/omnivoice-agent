@@ -60,6 +60,8 @@ class Persistence(Protocol):
     async def usage_summary(self, org_id: str) -> dict[str, Any]: ...
     async def call_analytics(self, org_id: str, since: datetime) -> dict[str, Any]: ...
     async def usage_since(self, org_id: str, since: datetime) -> dict[str, Any]: ...
+    async def org_plan(self, org_id: str) -> str | None: ...
+    async def count_outbound_jobs_since(self, org_id: str, since: datetime) -> int: ...
     async def list_agents(self, org_id: str) -> list[dict[str, Any]]: ...
     async def get_agent(self, org_id: str, agent_id: str) -> dict[str, Any] | None: ...
     async def create_agent(self, org_id: str, name: str, instructions: str, tools: list[str],
@@ -134,6 +136,7 @@ class InMemoryPersistence:
         self.call_events: list[dict[str, Any]] = []
         self.jobs: dict[str, dict[str, Any]] = {}
         self.api_keys: dict[str, dict[str, Any]] = {}
+        self.org_plans: dict[str, str] = {}
         self.webhooks: dict[str, dict[str, Any]] = {}
         self.webhook_deliveries: list[dict[str, Any]] = []
         self.dnc: dict[str, dict[str, Any]] = {}
@@ -186,6 +189,12 @@ class InMemoryPersistence:
     async def usage_summary(self, org_id):
         secs = sum(c.get("audio_seconds", 0) for c in self.convs.values() if c["org_id"] == org_id)
         return {"audio_seconds": secs, "estimated_cost_usd": round(secs / 60 * COST_PER_AUDIO_MINUTE_USD, 4)}
+
+    async def org_plan(self, org_id):
+        return self.org_plans.get(org_id)
+
+    async def count_outbound_jobs_since(self, org_id, since):
+        return sum(1 for j in self.jobs.values() if j["org_id"] == org_id and j["created_at"] >= since.timestamp())
 
     async def usage_since(self, org_id, since):
         return await self.usage_summary(org_id)  # en memoria no se guarda la fecha del consumo

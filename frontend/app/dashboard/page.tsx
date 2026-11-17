@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Analytics, api, MetricsResponse, pct, Percentiles, secs } from "@/lib/api";
+import { Analytics, api, MetricsResponse, pct, Percentiles, PlanInfo, secs } from "@/lib/api";
 
 const fmt = (v: number | null) => (v === null ? "—" : `${v} ms`);
 
@@ -22,12 +22,14 @@ export default function Dashboard() {
   const [m, setM] = useState<MetricsResponse | null>(null);
   const [audit, setAudit] = useState<{ ts: number; action: string; actor: string | null; detail: Record<string, unknown> }[]>([]);
   const [an, setAn] = useState<Analytics | null>(null);
+  const [plan, setPlan] = useState<PlanInfo | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     const tick = async () => {
       try {
+        api<PlanInfo>("/api/v1/plan", "admin").then((p) => { if (alive) setPlan(p); }).catch(() => undefined);
         const [metrics, logs, analytics] = await Promise.all([
           api<MetricsResponse>("/api/v1/metrics", "admin"),
           api<{ items: typeof audit }>("/api/v1/audit-logs?limit=25", "admin"),
@@ -46,6 +48,33 @@ export default function Dashboard() {
     <main className="mx-auto max-w-5xl space-y-6 p-6">
       <h1 className="text-2xl font-semibold">Panel de administración</h1>
       {err && <p role="alert" className="rounded bg-red-50 p-3 text-sm text-red-700">{err}</p>}
+      {plan && (
+        <section aria-label="Plan y consumo" className="space-y-2">
+          <h2 className="text-lg font-medium">
+            Plan {plan.name ?? plan.plan}
+            {!plan.enforced && <span className="ml-2 text-xs font-normal text-slate-400">(cuotas solo informativas)</span>}
+          </h2>
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            {([["minutes_per_month", "Minutos del mes", plan.usage.minutes_month], ["max_agents", "Agentes", plan.usage.agents],
+               ["max_phone_numbers", "Números", plan.usage.phone_numbers], ["max_outbound_per_day", "Salientes hoy", plan.usage.outbound_today],
+               ["max_kb_sources", "Documentos", plan.usage.kb_sources]] as const).map(([k, label, used]) => {
+              const limit = plan.limits[k];
+              const pc = plan.percent[k];
+              return (
+                <div key={k} className="rounded border p-4">
+                  <div className="text-xs text-slate-500">{label}</div>
+                  <div className="text-xl">{used}<span className="text-sm text-slate-400"> / {limit ?? "∞"}</span></div>
+                  {pc !== null && (
+                    <div className="mt-1 h-1.5 w-full rounded bg-slate-100">
+                      <div className={`h-1.5 rounded ${pc >= 100 ? "bg-red-500" : pc >= 80 ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${Math.min(pc, 100)}%` }} />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
       {an && (
         <section aria-label="Llamadas de los últimos 30 días" className="space-y-2">
           <h2 className="text-lg font-medium">Llamadas (30 días)</h2>

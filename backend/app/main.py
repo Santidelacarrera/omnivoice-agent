@@ -216,7 +216,10 @@ def create_app(
 
     setup_sentry(s)
     setup_tracing(app, s)
+    from app.billing.plans import Plans, QuotaExceeded
+
     app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
+    app.state.plans = Plans(s, lambda: app.state.db, lambda: app.state.store, lambda: app.state.repo, lambda: app.state.webhooks)
     registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
 
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
@@ -320,6 +323,10 @@ def create_app(
         if await budget_remaining_s(p.org_id) <= 0:
             BUDGET_REJECTED.labels("org_daily_budget").inc()
             raise HTTPException(429, "Presupuesto diario de conversación de la organización agotado")
+        try:
+            await app.state.plans.ensure_minutes(p.org_id)
+        except QuotaExceeded as exc:
+            raise HTTPException(429, exc.message) from None
         voice = body.voice if body else None
         language = body.language if body else None
         if voice and voice not in s.available_voices:
@@ -409,9 +416,21 @@ def create_app(
     async def list_agents(p: Principal = Depends(authed("agents:read"))):
         return {"items": await app.state.db.list_agents(p.org_id), "available_tools": [t["name"] for t in registry.schemas()]}
 
+    async def _plan_room(org_id: str, metric: str) -> None:
+        try:
+            await app.state.plans.ensure_room(org_id, metric)
+        except QuotaExceeded as exc:
+            raise HTTPException(409, exc.message) from None
+
+    @app.get("/api/v1/plan")
+    async def api_plan(p: Principal = Depends(authed("metrics:read"))):
+        """Plan de la organización, sus límites y cuánto lleva consumido este mes. Si las cuotas no están activadas solo se mide."""
+        return {**(await app.state.plans.snapshot(p.org_id)).as_dict(), "enforced": app.state.plans.enforced}
+
     @app.post("/api/v1/agents", status_code=201)
     async def create_agent(body: CreateAgentBody, p: Principal = Depends(authed("agents:write"))):
         _check_tools(body.tools)
+        await _plan_room(p.org_id, "max_agents")
         agent = await app.state.db.create_agent(p.org_id, body.name, body.instructions, body.tools, body.voice, body.language)
         await app.state.db.audit(p.org_id, p.user_id, "agent.created", {"agent_id": agent["id"], "tools": body.tools})
         return agent
@@ -540,6 +559,7 @@ def create_app(
             if existing["checksum"] == checksum:
                 raise HTTPException(409, f"Ese documento ya está cargado ({existing['name']}). Para actualizarlo usa PUT /knowledge/sources/{existing['id']}")
         await _kb_check_quota(p.org_id, len(chunks))
+        await _plan_room(p.org_id, "max_kb_sources")
         src = await app.state.repo.kb_create(p.org_id, body.name.strip(), kind, checksum, size, chunks, p.user_id)
         await app.state.db.audit(p.org_id, p.user_id, "knowledge.added", {"source_id": src["id"], "kind": kind, "chunks": len(chunks)})
         return src
@@ -762,6 +782,7 @@ def create_app(
     @app.post("/api/v1/phone-numbers", status_code=201)
     async def add_phone(body: PhoneNumberBody, p: Principal = Depends(authed("phones:write"))):
         _check_transfer_target(body.transfer_number)
+        await _plan_room(p.org_id, "max_phone_numbers")
         if body.agent_id is not None:
             await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
         try:
@@ -877,6 +898,11 @@ def create_app(
             voice=opts.get("voice") or (agent or {}).get("voice"),
             language=opts.get("language") or (agent or {}).get("language"))
         session_key = uuid.uuid4().hex
+        try:
+            await app.state.plans.ensure_minutes(principal.org_id)
+        except QuotaExceeded:
+            await ws.close(code=WS_CLOSE_CAPACITY)
+            return
         remaining = await budget_remaining_s(principal.org_id)
         if remaining <= 0 or len(live) >= s.max_total_sessions:
             BUDGET_REJECTED.labels("org_daily_budget" if remaining <= 0 else "global_concurrency").inc()
@@ -899,6 +925,7 @@ def create_app(
             except Exception:  # noqa: BLE001
                 log.exception("usage_accounting_failed", session=sess.id)
             await release_quietly(app.state.store, principal.org_id, session_key)
+            await app.state.plans.maybe_alert(principal.org_id)
 
         session: VoiceSession | None = None
         loop = asyncio.get_running_loop()
