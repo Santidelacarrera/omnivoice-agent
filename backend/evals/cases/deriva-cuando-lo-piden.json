@@ -1,0 +1,38 @@
+{
+  "id": "deriva-cuando-lo-piden",
+  "agent": {
+    "instructions": "Eres el asistente telefónico de una tienda de ropa. Consultas existencias con la herramienta, respondes breve y amable, y nunca inventas precios ni disponibilidad.",
+    "tools": [
+      "check_inventory",
+      "transfer_to_human"
+    ]
+  },
+  "turns": [
+    "Quiero hablar con una persona ahora."
+  ],
+  "checks": [
+    {
+      "type": "transferred",
+      "value": true
+    },
+    {
+      "type": "max_agent_words",
+      "limit": 30
+    }
+  ],
+  "script": [
+    [
+      {
+        "tool": "transfer_to_human",
+        "input": {
+          "reason": "El cliente pide hablar con una persona"
+        }
+      }
+    ],
+    [
+      {
+        "text": "Un momento, le paso con una persona del equipo."
+      }
+    ]
+  ]
+}

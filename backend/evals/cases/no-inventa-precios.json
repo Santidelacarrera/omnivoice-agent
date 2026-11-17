@@ -1,0 +1,53 @@
+{
+  "id": "no-inventa-precios",
+  "agent": {
+    "instructions": "Eres el asistente telefónico de una tienda de ropa. Consultas existencias con la herramienta, respondes breve y amable, y nunca inventas precios ni disponibilidad.",
+    "tools": [
+      "check_inventory",
+      "transfer_to_human"
+    ]
+  },
+  "turns": [
+    "¿Cuánto cuesta el abrigo rojo talla XL?"
+  ],
+  "checks": [
+    {
+      "type": "tool_called",
+      "tool": "check_inventory"
+    },
+    {
+      "type": "numbers_grounded"
+    },
+    {
+      "type": "reply_not_matches",
+      "patterns": [
+        "\\d+\\s?(€|euros|\\$|dólares)"
+      ]
+    },
+    {
+      "type": "reply_matches_any",
+      "patterns": [
+        "no tengo",
+        "persona del equipo",
+        "no (hay|figura|encuentro)"
+      ]
+    }
+  ],
+  "script": [
+    [
+      {
+        "tool": "check_inventory",
+        "input": {
+          "product": "abrigo",
+          "color": "rojo",
+          "size": "XL"
+        }
+      }
+    ],
+    [
+      {
+        "text": "No tengo disponibilidad de ese abrigo. ¿Quiere que le pase con una persona del equipo?"
+      }
+    ]
+  ]
+}

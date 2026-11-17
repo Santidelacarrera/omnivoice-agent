@@ -61,12 +61,14 @@ def test_twiml_is_escaped():
 
 
 class FakeTwilio:
-    def __init__(self): self.calls, self.redirects, self.hangups = [], [], []
+    def __init__(self): self.calls, self.redirects, self.hangups, self.sms = [], [], [], []
     async def create_call(self, to, from_, url, status_callback=None):
         self.calls.append((to, from_, url))
         return {"sid": "CAout" if len(self.calls) == 1 else f"CAout{len(self.calls)}", "status": "queued"}
     async def redirect_call(self, sid, twiml): self.redirects.append((sid, twiml))
     async def hangup(self, sid, cancel=False): self.hangups.append((sid, cancel))
+    async def send_sms(self, to, from_, body):
+        self.sms.append((to, from_, body)); return {"sid": "SM1"}
 
 
 def make(provider=None, **over):

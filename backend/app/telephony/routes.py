@@ -90,6 +90,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
         return
     client: TelephonyProvider = twilio or TwilioClient(s.twilio_account_sid, s.twilio_auth_token)
     app.state.twilio = client
+    app.state.messenger = client if hasattr(client, "send_sms") else None  # SMS de confirmación (solo al número de quien llama)
     background: set[asyncio.Task] = set()
     by_call: dict[tuple[str, str], VoiceSession] = {}  # (org, CallSid) → sesión viva, para dar contexto al traspaso
 
@@ -128,8 +129,9 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
             if not validate_signature(s.twilio_auth_token, url, form, request.headers.get("x-twilio-signature", "")):
                 ERRORS.labels("telephony_bad_signature").inc()
                 raise HTTPException(403, "Firma inválida")
-        call_sid, who = form.get("CallSid", ""), form.get("From", "")
+        call_sid = form.get("CallSid", "")
         outbound = form.get("Direction", "").startswith("outbound")
+        who = form.get("To", "") if outbound else form.get("From", "")  # el cliente: quien llama (entrante) o a quien se llama (saliente)
         # El número de la plataforma es el destino en llamadas entrantes y el origen en las salientes.
         ours = form.get("From", "") if outbound else form.get("To", "")
         mapped = await app.state.db.resolve_phone_number(ours) if ours else None
@@ -163,6 +165,11 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                 await app.state.db.audit(org, "telephony", "telephony.call_duplicate", {"call_sid": call_sid, "status": call["status"]})
                 return Response(hangup_twiml("Esta llamada ya fue atendida."), media_type="text/xml")
         principal = Principal(f"phone:{caller_id_hash(who)}", org, "customer")
+        if call_sid and who:  # el número completo solo para esta llamada: 5 min en el almacén efímero, nunca en la base de datos
+            try:
+                await app.state.store.put_session_options(f"caller:{call_sid}", {"number": who}, 300)
+            except Exception:  # noqa: BLE001
+                ERRORS.labels("telephony_caller_context").inc()
         ticket = uuid.uuid4().hex
         await app.state.store.put_ticket(f"tel:{ticket}", principal, 60, agent_id or None)
         await app.state.db.audit(org, principal.user_id, "telephony.call_received",
@@ -366,6 +373,9 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                     sender.stream_sid = start.get("streamSid")
                     call_sid = start.get("callSid") or params.get("call_sid", "")
                     agent = await app.state.db.get_agent(principal.org_id, agent_id) if agent_id else None
+                    caller = (await app.state.store.take_session_options(f"caller:{call_sid}")).get("number") if call_sid else None
+                    row = await app.state.db.get_call_by_sid(principal.org_id, "twilio", call_sid) if call_sid else None
+                    call_ctx = {"caller": caller, "our_number": (row or {}).get("our_number"), "sms_sent": 0}
                     org_id = principal.org_id
 
                     async def on_close(sess: VoiceSession, org_id=org_id, call_sid=call_sid):
@@ -380,6 +390,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
 
                     session = VoiceSession(
                         principal, make_provider(), registry, sender, s, persistence=app.state.db, webhooks=app.state.webhooks,
+                        call_context=call_ctx,
                         instructions=(agent["instructions"] if agent else
                                       "Eres un agente telefónico de atención al cliente. Responde breve y usa herramientas para datos reales."),
                         allowed_tools=set(agent["tools"]) if agent and agent["tools"] else None,

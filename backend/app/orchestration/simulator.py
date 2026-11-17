@@ -39,10 +39,14 @@ def validate_turns(turns: list[str]) -> list[str]:
     return cleaned
 
 
-async def simulate(settings: Settings, llm: Any, agent: dict[str, Any], org_id: str, turns: list[str]) -> dict[str, Any]:
+async def simulate(settings: Settings, llm: Any, agent: dict[str, Any], org_id: str, turns: list[str],
+                   collect_outputs: bool = False) -> dict[str, Any]:
     """Conversa con el agente. `llm` cumple el contrato `LLMClient` del pipeline en cascada."""
     turns = validate_turns(turns)
-    registry = build_registry(InMemoryRepository())  # sandbox nuevo en cada simulación
+    repo = InMemoryRepository()  # sandbox nuevo en cada simulación
+    for key, item in list(repo.stock.items()):  # los datos de demostración se siembran para la organización que simula
+        repo.stock[(org_id, *key[1:])] = dict(item)
+    registry = build_registry(repo)
     allowed = set(agent["tools"]) if agent.get("tools") else None
     tools = [{"name": t["name"], "description": t.get("description", ""),
               "input_schema": t.get("parameters") or {"type": "object", "properties": {}}}
@@ -52,6 +56,7 @@ async def simulate(settings: Settings, llm: Any, agent: dict[str, Any], org_id: 
     messages: list[dict[str, Any]] = []
     transcript: list[dict[str, Any]] = []
     tool_log: list[dict[str, Any]] = []
+    outputs: list[str] = []  # solo para evaluaciones: lo que devolvieron las herramientas (datos de demostración del sandbox)
     usage = {"in": 0, "out": 0}
     call_n = 0
     turn_n = 0
@@ -95,6 +100,7 @@ async def simulate(settings: Settings, llm: Any, agent: dict[str, Any], org_id: 
                         pending.pop(key, None)
                         out = await registry.execute(tu["name"], tu["input"], principal, f"sim-{call_n}", allowed)
                     tool_log.append({"tool": tu["name"], "ok": bool(out.get("ok")), "error": out.get("error")})
+                    outputs.append(json.dumps(out, ensure_ascii=False))
                     results.append({"type": "tool_result", "tool_use_id": tu["id"], "content": json.dumps(out, ensure_ascii=False)})
                 messages.append({"role": "user", "content": results})
             else:
@@ -108,6 +114,7 @@ async def simulate(settings: Settings, llm: Any, agent: dict[str, Any], org_id: 
         raise
     except Exception:  # noqa: BLE001 - el detalle del proveedor no se expone
         raise SimulationError(502, "El modelo no respondió; inténtalo de nuevo") from None
-    return {"sandbox": True, "note": "Las herramientas usaron datos de demostración: no se leyó ni se cambió ningún dato real.",
+    extra = {"_tool_outputs": outputs} if collect_outputs else {}
+    return {**extra, "sandbox": True, "note": "Las herramientas usaron datos de demostración: no se leyó ni se cambió ningún dato real.",
             "transcript": transcript, "tools": tool_log, "usage": usage,
             "transferred": any(t["tool"] == "transfer_to_human" and t["ok"] for t in tool_log)}

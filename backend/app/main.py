@@ -71,6 +71,15 @@ class PhoneNumberBody(BaseModel):
     transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
 
 
+class OrderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phone: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$", description="Número del cliente; solo se guarda su huella")
+    status: str = Field(pattern=r"^(received|preparing|shipped|delivered|cancelled)$")
+    summary: str = Field(min_length=1, max_length=300)
+    total: float | None = Field(default=None, ge=0)
+    eta_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+
+
 class CreateWebhookBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     url: str = Field(min_length=10, max_length=2000)
@@ -194,7 +203,7 @@ def create_app(
     from app.services.webhooks import WebhookService
 
     app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
-    registry = build_registry(_RepoProxy(app))
+    registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
 
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST"],
                        allow_headers=["Authorization", "Content-Type"], allow_credentials=True)
@@ -467,6 +476,40 @@ def create_app(
 
     _status_route("publish", "published", "agent.published")
     _status_route("archive", "archived", "agent.archived")
+
+    # ---------- pedidos y clientes ----------
+    @app.put("/api/v1/orders/{order_id}")
+    async def put_order(order_id: str, body: OrderBody, p: Principal = Depends(authed("orders:write"))):
+        """Importa o actualiza un pedido desde el sistema de la empresa. El agente solo lo muestra a quien llama desde ese número."""
+        import datetime as _dt
+        import re as _re
+
+        from app.telephony.routes import caller_id_hash
+
+        if not _re.fullmatch(r"[A-Za-z0-9-]{4,30}", order_id):
+            raise HTTPException(422, "Código de pedido inválido")
+        if body.eta_date:
+            try:
+                _dt.date.fromisoformat(body.eta_date)
+            except ValueError:
+                raise HTTPException(422, "eta_date inválida") from None
+        data = {"phone_hash": caller_id_hash(body.phone), "status": body.status, "summary": body.summary, "total": body.total,
+                "eta_date": body.eta_date}
+        await app.state.repo.upsert_order(p.org_id, order_id, data)
+        await app.state.db.audit(p.org_id, p.user_id, "order.upserted", {"order_id": order_id, "status": body.status})
+        return {"order_id": order_id, "status": body.status, "summary": body.summary, "total": body.total, "eta_date": body.eta_date}
+
+    @app.get("/api/v1/customers")
+    async def list_customers(p: Principal = Depends(authed("customers:write"))):
+        return {"items": await app.state.repo.list_customers(p.org_id)}
+
+    @app.delete("/api/v1/customers/{customer_id}", status_code=204)
+    async def delete_customer(customer_id: str, p: Principal = Depends(authed("customers:write"))):
+        """Supresión de un cliente registrado por el agente (derecho de supresión)."""
+        if not await app.state.repo.delete_customer(p.org_id, _valid_id(customer_id)):
+            raise HTTPException(404, "Cliente no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "customer.deleted", {"customer_id": customer_id})
+        return Response(status_code=204)
 
     # ---------- webhooks salientes ----------
     def _check_events(events: list[str]) -> list[str]:

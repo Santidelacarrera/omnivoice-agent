@@ -76,6 +76,45 @@ class PostgresRepository:
                             {"o": org_id, "i": reservation_id})
         return await self.get_reservation(org_id, reservation_id)
 
+    async def find_customer(self, org_id: str, phone_hash: str) -> dict[str, Any] | None:
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT id, first_name, created_at FROM customers WHERE org_id = :o AND phone_hash = :h"),
+                                 {"o": org_id, "h": phone_hash})).first()
+        return {"id": str(r[0]), "first_name": r[1], "created_at": r[2].timestamp()} if r else None
+
+    async def create_customer(self, org_id: str, phone_hash: str, first_name: str) -> dict[str, Any]:
+        async with org_transaction(org_id) as c:
+            await c.execute(text("INSERT INTO customers (org_id, phone_hash, first_name) VALUES (:o, :h, :n) "
+                                 "ON CONFLICT (org_id, phone_hash) DO NOTHING"), {"o": org_id, "h": phone_hash, "n": first_name})
+        return await self.find_customer(org_id, phone_hash) or {}
+
+    async def list_customers(self, org_id: str) -> list[dict[str, Any]]:
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT id, first_name, created_at FROM customers WHERE org_id = :o ORDER BY created_at DESC LIMIT 500"),
+                                    {"o": org_id})).all()
+        return [{"id": str(r[0]), "first_name": r[1], "created_at": r[2].timestamp()} for r in rows]
+
+    async def delete_customer(self, org_id: str, customer_id: str) -> bool:
+        async with org_transaction(org_id) as c:
+            return bool((await c.execute(text("DELETE FROM customers WHERE id = :i AND org_id = :o"), {"i": customer_id, "o": org_id})).rowcount)
+
+    async def get_order(self, org_id: str, order_id: str) -> dict[str, Any] | None:
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT id, phone_hash, status, summary, total, eta_date FROM orders WHERE org_id = :o AND id = :i"),
+                                 {"o": org_id, "i": order_id})).first()
+        return ({"order_id": r[0], "phone_hash": r[1], "status": r[2], "summary": r[3], "total": float(r[4]) if r[4] is not None else None,
+                 "eta_date": str(r[5]) if r[5] else None} if r else None)
+
+    async def upsert_order(self, org_id: str, order_id: str, data: dict[str, Any]) -> dict[str, Any]:
+        eta = date.fromisoformat(data["eta_date"]) if data.get("eta_date") else None
+        async with org_transaction(org_id) as c:
+            await c.execute(
+                text("INSERT INTO orders (org_id, id, phone_hash, status, summary, total, eta_date) VALUES (:o, :i, :h, :s, :m, :t, :e) "
+                     "ON CONFLICT (org_id, id) DO UPDATE SET phone_hash = EXCLUDED.phone_hash, status = EXCLUDED.status, "
+                     "summary = EXCLUDED.summary, total = EXCLUDED.total, eta_date = EXCLUDED.eta_date, updated_at = now()"),
+                {"o": org_id, "i": order_id, "h": data["phone_hash"], "s": data["status"], "m": data["summary"], "t": data.get("total"), "e": eta})
+        return {"order_id": order_id, **data}
+
     async def create_ticket(self, org_id: str, data: dict[str, Any]) -> dict[str, Any]:
         tid = secrets.token_hex(4).upper()
         async with org_transaction(org_id) as c:
