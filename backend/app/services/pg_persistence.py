@@ -2,6 +2,7 @@
 no requiera SQLAlchemy ni asyncpg."""
 import json
 import uuid
+from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import text
@@ -513,6 +514,93 @@ class PostgresPersistence:
         async with org_transaction(org_id) as c:
             await c.execute(text("UPDATE api_keys SET last_used_at = now() WHERE id = :i AND org_id = :o"), {"i": key_id, "o": org_id})
 
+    # ---- webhooks ----
+    _WH_COLS = "id, url, events, description, active, created_by, created_at"
+
+    @staticmethod
+    def _wh(r):
+        return {"id": str(r[0]), "url": r[1], "events": list(r[2]), "description": r[3], "active": r[4], "created_by": r[5],
+                "created_at": r[6].timestamp()}
+
+    async def create_webhook(self, org_id, url, secret_enc, events, description, created_by):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(
+                text("INSERT INTO webhook_endpoints (org_id, url, secret_enc, events, description, created_by) "
+                     "VALUES (:o, :u, :s, :e, :d, :b) RETURNING " + self._WH_COLS),  # noqa: S608 - columnas constantes
+                {"o": org_id, "u": url, "s": secret_enc, "e": events, "d": description, "b": created_by})).first()
+        return self._wh(r)
+
+    async def list_webhooks(self, org_id):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT " + self._WH_COLS + " FROM webhook_endpoints WHERE org_id = :o ORDER BY created_at"),  # noqa: S608
+                                    {"o": org_id})).all()
+        return [self._wh(r) for r in rows]
+
+    async def get_webhook(self, org_id, webhook_id):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT " + self._WH_COLS + " FROM webhook_endpoints WHERE id = :i AND org_id = :o"),  # noqa: S608
+                                 {"i": webhook_id, "o": org_id})).first()
+        return self._wh(r) if r else None
+
+    async def update_webhook(self, org_id, webhook_id, changes):
+        allowed = {"url": "url", "events": "events", "description": "description", "active": "active", "secret_enc": "secret_enc"}
+        cols = [f"{allowed[k]} = :{k}" for k in changes if k in allowed]
+        if not cols:
+            return await self.get_webhook(org_id, webhook_id)
+        async with org_transaction(org_id) as c:
+            n = (await c.execute(text("UPDATE webhook_endpoints SET " + ", ".join(cols) + " WHERE id = :i AND org_id = :o"),  # noqa: S608 - lista cerrada
+                                 {**{k: v for k, v in changes.items() if k in allowed}, "i": webhook_id, "o": org_id})).rowcount
+        return await self.get_webhook(org_id, webhook_id) if n else None
+
+    async def delete_webhook(self, org_id, webhook_id):
+        async with org_transaction(org_id) as c:
+            return bool((await c.execute(text("DELETE FROM webhook_endpoints WHERE id = :i AND org_id = :o"),
+                                         {"i": webhook_id, "o": org_id})).rowcount)
+
+    async def enqueue_webhook_event(self, org_id, event_id, event_type, payload):
+        async with org_transaction(org_id) as c:
+            res = await c.execute(
+                text("INSERT INTO webhook_deliveries (org_id, endpoint_id, event_id, event_type, payload, next_attempt_at) "
+                     "SELECT :o, e.id, CAST(:ev AS uuid), :t, CAST(:p AS jsonb), :now FROM webhook_endpoints e "
+                     "WHERE e.org_id = :o AND e.active AND ('*' = ANY(e.events) OR :t = ANY(e.events)) "
+                     "ON CONFLICT (endpoint_id, event_id) DO NOTHING"),
+                {"o": org_id, "ev": event_id, "t": event_type, "p": json.dumps(payload), "now": datetime.now(timezone.utc)})  # reloj de la aplicación, igual que el de tick()
+        return res.rowcount
+
+    async def claim_due_webhook_deliveries(self, now, limit, stale_s):
+        async with get_engine().begin() as c:
+            rows = (await c.execute(text("SELECT * FROM claim_due_webhook_deliveries(:n, :l, :s)"),
+                                    {"n": now, "l": limit, "s": stale_s})).mappings().all()
+        return [{"id": r["id"], "org_id": str(r["org_id"]), "endpoint_id": str(r["endpoint_id"]), "url": r["url"],
+                 "secret_enc": r["secret_enc"], "event_id": str(r["event_id"]), "event_type": r["event_type"],
+                 "payload": r["payload"] if isinstance(r["payload"], dict) else json.loads(r["payload"]),
+                 "attempts": r["attempts"]} for r in rows]
+
+    async def finish_webhook_delivery(self, org_id, delivery_id, ok, status, error, next_attempt_at):
+        async with org_transaction(org_id) as c:
+            if ok:
+                await c.execute(text("UPDATE webhook_deliveries SET status = 'delivered', attempts = attempts + 1, last_status = :s, "
+                                     "last_error = NULL, claimed_at = NULL, delivered_at = now() WHERE id = :i AND org_id = :o"),
+                                {"s": status, "i": delivery_id, "o": org_id})
+            elif next_attempt_at is not None:
+                await c.execute(text("UPDATE webhook_deliveries SET status = 'pending', attempts = attempts + 1, last_status = :s, "
+                                     "last_error = :e, claimed_at = NULL, next_attempt_at = :n WHERE id = :i AND org_id = :o"),
+                                {"s": status, "e": error, "n": next_attempt_at, "i": delivery_id, "o": org_id})
+            else:
+                await c.execute(text("UPDATE webhook_deliveries SET status = 'failed', attempts = attempts + 1, last_status = :s, "
+                                     "last_error = :e, claimed_at = NULL WHERE id = :i AND org_id = :o"),
+                                {"s": status, "e": error, "i": delivery_id, "o": org_id})
+
+    async def list_webhook_deliveries(self, org_id, webhook_id, limit=50):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(
+                text("SELECT id, event_id, event_type, status, attempts, last_status, last_error, created_at, delivered_at "
+                     "FROM webhook_deliveries WHERE org_id = :o AND endpoint_id = :e ORDER BY id DESC LIMIT :l"),
+                {"o": org_id, "e": webhook_id, "l": limit})).all()
+        ts = lambda v: v.timestamp() if v else None  # noqa: E731
+        return [{"id": r[0], "event_id": str(r[1]), "event_type": r[2], "status": r[3], "attempts": r[4], "last_status": r[5],
+                 "last_error": r[6], "created_at": ts(r[7]), "delivered_at": ts(r[8])} for r in rows]
+
     async def is_do_not_call(self, org_id, number_hash):
         async with org_transaction(org_id) as c:
             return (await c.execute(text("SELECT 1 FROM do_not_call WHERE org_id = :o AND number_hash = :h"),
@@ -545,6 +633,39 @@ class PostgresPersistence:
                 text("SELECT COALESCE(sum(audio_seconds),0) s, COALESCE(sum(estimated_cost_usd),0) c "
                      "FROM usage_records WHERE org_id = :o"), {"o": org_id})).first()
         return {"audio_seconds": float(r.s), "estimated_cost_usd": float(r.c)}
+
+    async def usage_since(self, org_id, since):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(
+                text("SELECT COALESCE(sum(audio_seconds),0) s, COALESCE(sum(estimated_cost_usd),0) c "
+                     "FROM usage_records WHERE org_id = :o AND ts >= :s"), {"o": org_id, "s": since})).first()
+        return {"audio_seconds": float(r.s), "estimated_cost_usd": float(r.c)}
+
+    async def call_analytics(self, org_id, since):
+        """Agregados en SQL (no se traen filas): el coste no crece con el número de llamadas."""
+        missed = "status IN ('BUSY','NO_ANSWER','FAILED') AND answered_at IS NULL"
+        async with org_transaction(org_id) as c:
+            t = (await c.execute(text(
+                "SELECT count(*) total, count(*) FILTER (WHERE direction = 'inbound') inb, count(*) FILTER (WHERE direction = 'outbound') outb, "  # noqa: S608 - `missed` es una constante local, sin entrada del usuario
+                "count(*) FILTER (WHERE answered_at IS NOT NULL) ans, count(*) FILTER (WHERE " + missed + ") mis, "
+                "count(*) FILTER (WHERE status = 'TRANSFERRED') tr, "
+                "avg(EXTRACT(EPOCH FROM (ended_at - answered_at))) FILTER (WHERE answered_at IS NOT NULL AND ended_at IS NOT NULL) dur "
+                "FROM calls WHERE org_id = :o AND created_at >= :s"), {"o": org_id, "s": since})).first()
+            st = (await c.execute(text("SELECT status, count(*) FROM calls WHERE org_id = :o AND created_at >= :s GROUP BY status"),
+                                  {"o": org_id, "s": since})).all()
+            days = (await c.execute(text(  # noqa: S608
+                "SELECT (created_at AT TIME ZONE 'UTC')::date d, count(*), count(*) FILTER (WHERE answered_at IS NOT NULL), "
+                "count(*) FILTER (WHERE " + missed + "), count(*) FILTER (WHERE status = 'TRANSFERRED') "
+                "FROM calls WHERE org_id = :o AND created_at >= :s GROUP BY d ORDER BY d"), {"o": org_id, "s": since})).all()
+            ag = (await c.execute(text(
+                "SELECT agent_id, count(*), count(*) FILTER (WHERE answered_at IS NOT NULL) FROM calls "
+                "WHERE org_id = :o AND created_at >= :s AND agent_id IS NOT NULL GROUP BY agent_id ORDER BY agent_id"),
+                {"o": org_id, "s": since})).all()
+        return {"calls": {"total": t.total, "inbound": t.inb, "outbound": t.outb, "answered": t.ans, "missed": t.mis, "transferred": t.tr,
+                          "avg_duration_s": round(float(t.dur), 1) if t.dur is not None else None},
+                "by_status": {r[0]: r[1] for r in st},
+                "by_day": [{"date": r[0].isoformat(), "calls": r[1], "answered": r[2], "missed": r[3], "transferred": r[4]} for r in days],
+                "by_agent": [{"agent_id": str(r[0]), "calls": r[1], "answered": r[2]} for r in ag]}
 
     async def org_policy(self, org_id):
         try:

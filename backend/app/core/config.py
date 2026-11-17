@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     outbound_poll_seconds: int = 15
     outbound_stale_claim_seconds: int = 600  # un trabajo "marcando" más tiempo que esto se recupera (réplica caída)
     outbound_scheduler_enabled: bool = True
+    # Webhooks salientes
+    webhooks_enabled: bool = True
+    webhook_worker_enabled: bool = True  # False = solo encola (otro proceso o los tests envían)
+    webhook_secret_key: str = ""  # clave para cifrar los secretos de firma; vacío = se deriva de JWT_SECRET (define una en producción)
+    webhooks_allow_private: bool = False  # solo desarrollo: permite http y destinos en redes privadas (desactiva la defensa SSRF)
+    webhook_poll_seconds: int = 5
+    webhook_timeout_s: float = 5.0
+    webhook_stale_claim_seconds: int = 300
+    webhooks_max_per_org: int = 10
     simulate_per_minute: int = 10  # simulaciones de agente por organización y minuto (cada una consume el modelo)
     human_transfer_number: str = ""  # número E.164 del operador/cola humana
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada

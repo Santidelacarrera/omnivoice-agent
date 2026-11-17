@@ -52,7 +52,9 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] `subscriptions`, `invoices`, cuotas por plan, margen por organización, Grafana, OpenTelemetry, Sentry.
 
 ## ETAPA 10 — API pública y webhooks
-- [ ] `/calls`, `/usage`, `/analytics`, webhooks firmados, SDK y documentación.
+- [x] `GET /api/v1/usage` y `GET /api/v1/analytics` (llamadas, atendidas, perdidas, transferencias, duración media, por día y por agente; agregados en SQL).
+- [x] Webhooks salientes firmados (HMAC-SHA256 con marca de tiempo), cola en la base de datos con reintentos (30 s, 2 min, 10 min, 1 h, 6 h), secreto cifrado en reposo y rotable, protección SSRF (solo https, solo IP públicas, comprobada al registrar y al enviar, conexión fijada a la IP validada, sin seguir redirecciones). Eventos: `call.started|completed|failed|transferred`, `tool.executed`, `webhook.test`. Migración 012.
+- [ ] Pendiente: `POST /api/v1/calls` (alias de salientes), evento de alerta de consumo (necesita cuotas por plan, Etapa 9), SDK y ejemplos de integración, purga de entregas antiguas, desactivar automáticamente un endpoint que falla de forma sostenida.
 
 ## ETAPA 11–13
 - [ ] Carga y recuperación; staging/producción con aprobación; piloto con 3–5 clínicas.

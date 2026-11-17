@@ -19,4 +19,24 @@ Reglas: no se puede crear una clave con más permisos que los propios, nunca `ow
 Detalle de reglas (consentimiento, horarios, confirmación de acciones, privacidad) en `docs/RUNBOOK.md` y `docs/AI_ORCHESTRATION.md`. La especificación OpenAPI completa está en `/docs` fuera de producción.
 
 ## Pendiente respecto al documento maestro
-`POST /api/v1/calls` (crear llamada: hoy es `POST /outbound-calls`), `GET /api/v1/usage` y `GET /api/v1/analytics`, webhooks salientes firmados y SDK.
+`POST /api/v1/calls` (crear llamada: hoy es `POST /outbound-calls`), alertas de consumo por webhook y SDK.
+
+## Uso y analítica
+`GET /api/v1/usage?days=30` (minutos de audio, coste estimado de voz, llamadas y coste por llamada; **estimación, no factura**) y `GET /api/v1/analytics?days=30` (llamadas totales/entrantes/salientes, atendidas, perdidas, transferidas, duración media, tasas, serie por día y por agente). `days` entre 1 y 365. Permiso `metrics:read`; solo datos de tu organización y sin datos personales.
+
+## Webhooks
+Registro (owner/admin, con JWT; una clave de API no puede gestionarlos): `POST /api/v1/webhooks {"url": "https://...", "events": ["call.completed", ...] | ["*"], "description"?}`. Devuelve el **secreto de firma una sola vez** (`whsec_...`); se guarda cifrado. Otros: `GET`, `PATCH /{id}` (`url`, `events`, `active`), `DELETE /{id}`, `POST /{id}/rotate-secret`, `POST /{id}/test`, `GET /{id}/deliveries`.
+
+**Eventos:** `call.started` (conectada), `call.completed`, `call.failed` (ocupado, sin respuesta, fallo o cancelada; trae `status`), `call.transferred`, `tool.executed` (nombre, resultado y duración; nunca argumentos), `webhook.test`. Los eventos llevan identificadores y estados, **no** números de teléfono, transcripciones ni datos del cliente.
+
+**Entrega:** `POST` JSON `{"id", "type", "created", "org_id", "data"}` con cabeceras `X-OmniVoice-Event`, `X-OmniVoice-Delivery` (= `id`) y `X-OmniVoice-Signature: t=<unix>,v1=<hex>`. Responde 2xx en menos de 5 s. Si no, se reintenta a los 30 s, 2 min, 10 min, 1 h y 6 h y después se da por fallida (visible en `/deliveries`). Es **al menos una vez**: deduplica por `id`.
+
+**Verificar la firma** (rechaza si falla o si `t` tiene más de 5 minutos):
+```python
+import hmac, hashlib, time
+def verify(secret, header, body, tolerance=300):
+    p = dict(x.split("=", 1) for x in header.split(","))
+    ok = hmac.compare_digest(hmac.new(secret.encode(), f"{p['t']}.{body}".encode(), hashlib.sha256).hexdigest(), p["v1"])
+    return ok and abs(time.time() - int(p["t"])) <= tolerance
+```
+Usa el cuerpo **crudo** tal como llega. **Seguridad:** la URL debe ser https, sin credenciales, y resolver solo a direcciones públicas; no se siguen redirecciones. Variables: `WEBHOOK_SECRET_KEY` (cifrado de secretos; si falta se deriva de `JWT_SECRET`, y rotar esa clave dejaría ilegibles los secretos guardados: define una propia en producción), `WEBHOOKS_ALLOW_PRIVATE` (**solo desarrollo**: desactiva la defensa SSRF).

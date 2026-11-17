@@ -29,6 +29,9 @@ from app.telephony.twilio import TwilioClient, dial_twiml, hangup_twiml, stream_
 log = structlog.get_logger()
 
 WS_CLOSE_UNAUTHORIZED = 4401
+# Estado de llamada → evento de webhook (solo identificador y estado; sin número ni conversación).
+CALL_WEBHOOK_EVENTS = {"CONNECTED": "call.started", "COMPLETED": "call.completed", "TRANSFERRED": "call.transferred",
+                       "FAILED": "call.failed", "BUSY": "call.failed", "NO_ANSWER": "call.failed", "CANCELLED": "call.failed"}
 WS_CLOSE_CAPACITY = 4429
 MAX_MEDIA_BYTES = 4096  # un frame de Twilio son 160 bytes (20 ms); mucho más es anómalo
 
@@ -97,6 +100,10 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
         res = await app.state.db.apply_call_event(org, "twilio", sid, status, key, detail or {})
         if res:
             CALL_EVENTS.labels(status, "duplicate" if res["duplicate"] else "applied" if res["applied"] else "ignored").inc()
+            if res["applied"]:
+                event = CALL_WEBHOOK_EVENTS.get(res["status"])
+                if event:
+                    await app.state.webhooks.emit(org, event, {"call_id": res["call_id"], "status": res["status"]})
             if res["applied"] and cs.is_terminal(res["status"]):
                 try:  # decide reintento / fin de un trabajo saliente; nunca rompe la llamada
                     await dialer.on_call_finished(org, sid, res["status"])
@@ -366,7 +373,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                             log.exception("usage_accounting_failed", session=sess.id)
 
                     session = VoiceSession(
-                        principal, make_provider(), registry, sender, s, persistence=app.state.db,
+                        principal, make_provider(), registry, sender, s, persistence=app.state.db, webhooks=app.state.webhooks,
                         instructions=(agent["instructions"] if agent else
                                       "Eres un agente telefónico de atención al cliente. Responde breve y usa herramientas para datos reales."),
                         allowed_tools=set(agent["tools"]) if agent and agent["tools"] else None,

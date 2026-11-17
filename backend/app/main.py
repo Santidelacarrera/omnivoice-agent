@@ -71,6 +71,21 @@ class PhoneNumberBody(BaseModel):
     transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
 
 
+class CreateWebhookBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str = Field(min_length=10, max_length=2000)
+    events: list[str] = Field(default_factory=lambda: ["*"], min_length=1, max_length=10)
+    description: str | None = Field(default=None, max_length=200)
+
+
+class UpdateWebhookBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    url: str | None = Field(default=None, min_length=10, max_length=2000)
+    events: list[str] | None = Field(default=None, min_length=1, max_length=10)
+    description: str | None = Field(default=None, max_length=200)
+    active: bool | None = None
+
+
 class CreateApiKeyBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=2, max_length=80)
@@ -110,6 +125,8 @@ def create_app(
     retention_backend: RetentionBackend | None = None,
     twilio: Any = None,
     simulator_llm: Any = None,
+    webhook_http: Any = None,
+    webhook_resolver: Any = None,
 ) -> FastAPI:
     s = settings or get_settings()
     live: dict[str, VoiceSession] = {}
@@ -150,9 +167,13 @@ def create_app(
         dialer = getattr(app.state, "dialer", None)
         if dialer and s.outbound_scheduler_enabled:
             dialer.start()
+        if s.webhooks_enabled and s.webhook_worker_enabled:
+            app.state.webhooks.start()
         yield
         if dialer:
             await dialer.stop()
+        if s.webhooks_enabled and s.webhook_worker_enabled:
+            await app.state.webhooks.stop()
         if retention_job:
             await retention_job.stop()
         # Cierre ordenado: finaliza sesiones vivas para no perder conversaciones ni consumo.
@@ -169,6 +190,10 @@ def create_app(
     app.state.db = persistence or InMemoryPersistence()
     app.state.store = store or InMemoryStateStore()
     app.state.repo = repository or InMemoryRepository()
+    from app.security.netguard import system_resolver
+    from app.services.webhooks import WebhookService
+
+    app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
     registry = build_registry(_RepoProxy(app))
 
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST"],
@@ -443,6 +468,96 @@ def create_app(
     _status_route("publish", "published", "agent.published")
     _status_route("archive", "archived", "agent.archived")
 
+    # ---------- webhooks salientes ----------
+    def _check_events(events: list[str]) -> list[str]:
+        from app.services.webhooks import EVENT_TYPES
+
+        bad = [e for e in events if e != "*" and e not in EVENT_TYPES]
+        if bad:
+            raise HTTPException(422, f"Eventos desconocidos: {bad}. Disponibles: {list(EVENT_TYPES)} o \"*\"")
+        return sorted(set(events))
+
+    async def _checked_url(url: str) -> str:
+        from app.security.netguard import UnsafeUrl
+
+        try:
+            await app.state.webhooks.validate_url(url)
+        except UnsafeUrl as exc:
+            raise HTTPException(422, str(exc)) from None
+        return url
+
+    @app.post("/api/v1/webhooks", status_code=201)
+    async def create_webhook(body: CreateWebhookBody, p: Principal = Depends(authed("webhooks:write"))):
+        """Registra un destino de eventos. El secreto de firma se devuelve **una sola vez**; se guarda cifrado."""
+        from app.services.webhooks import new_secret
+
+        _humans_only(p)
+        if len(await app.state.db.list_webhooks(p.org_id)) >= s.webhooks_max_per_org:
+            raise HTTPException(409, f"Máximo {s.webhooks_max_per_org} webhooks por organización")
+        url = await _checked_url(body.url)
+        secret = new_secret()
+        hook = await app.state.db.create_webhook(p.org_id, url, app.state.webhooks.encrypt_secret(secret), _check_events(body.events),
+                                                 body.description, p.user_id)
+        await app.state.db.audit(p.org_id, p.user_id, "webhook.created", {"webhook_id": hook["id"], "events": hook["events"]})
+        return {**hook, "secret": secret, "warning": "Guarda este secreto ahora: no se vuelve a mostrar."}
+
+    @app.get("/api/v1/webhooks")
+    async def list_webhooks(p: Principal = Depends(authed("webhooks:write"))):
+        from app.services.webhooks import EVENT_TYPES
+
+        return {"items": await app.state.db.list_webhooks(p.org_id), "available_events": ["*", *EVENT_TYPES]}
+
+    @app.patch("/api/v1/webhooks/{webhook_id}")
+    async def update_webhook(webhook_id: str, body: UpdateWebhookBody, p: Principal = Depends(authed("webhooks:write"))):
+        _humans_only(p)
+        changes = body.model_dump(exclude_unset=True, exclude_none=True)
+        if not changes:
+            raise HTTPException(422, "Sin cambios")
+        if "url" in changes:
+            await _checked_url(changes["url"])
+        if "events" in changes:
+            changes["events"] = _check_events(changes["events"])
+        hook = await app.state.db.update_webhook(p.org_id, _valid_id(webhook_id), changes)
+        if not hook:
+            raise HTTPException(404, "Webhook no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "webhook.updated", {"webhook_id": webhook_id, "fields": sorted(changes)})
+        return hook
+
+    @app.delete("/api/v1/webhooks/{webhook_id}", status_code=204)
+    async def delete_webhook(webhook_id: str, p: Principal = Depends(authed("webhooks:write"))):
+        _humans_only(p)
+        if not await app.state.db.delete_webhook(p.org_id, _valid_id(webhook_id)):
+            raise HTTPException(404, "Webhook no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "webhook.deleted", {"webhook_id": webhook_id})
+        return Response(status_code=204)
+
+    @app.post("/api/v1/webhooks/{webhook_id}/rotate-secret")
+    async def rotate_webhook_secret(webhook_id: str, p: Principal = Depends(authed("webhooks:write"))):
+        """Genera un secreto nuevo (el anterior deja de valer al instante) y lo muestra una sola vez."""
+        from app.services.webhooks import new_secret
+
+        _humans_only(p)
+        secret = new_secret()
+        hook = await app.state.db.update_webhook(p.org_id, _valid_id(webhook_id), {"secret_enc": app.state.webhooks.encrypt_secret(secret)})
+        if not hook:
+            raise HTTPException(404, "Webhook no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "webhook.secret_rotated", {"webhook_id": webhook_id})
+        return {**hook, "secret": secret, "warning": "Guarda este secreto ahora: no se vuelve a mostrar."}
+
+    @app.post("/api/v1/webhooks/{webhook_id}/test", status_code=202)
+    async def test_webhook(webhook_id: str, p: Principal = Depends(authed("webhooks:write"))):
+        hook = await app.state.db.get_webhook(p.org_id, _valid_id(webhook_id))
+        if not hook:
+            raise HTTPException(404, "Webhook no encontrado")
+        queued = await app.state.webhooks.emit(p.org_id, "webhook.test", {"message": "Evento de prueba de OmniVoice", "webhook_id": webhook_id})
+        return {"queued": queued}
+
+    @app.get("/api/v1/webhooks/{webhook_id}/deliveries")
+    async def webhook_deliveries(webhook_id: str, limit: int = 50, p: Principal = Depends(authed("webhooks:write"))):
+        if not await app.state.db.get_webhook(p.org_id, _valid_id(webhook_id)):
+            raise HTTPException(404, "Webhook no encontrado")
+        return {"items": await app.state.db.list_webhook_deliveries(p.org_id, webhook_id, max(1, min(limit, 200)))}
+
     def _humans_only(p: Principal) -> None:
         """Una clave de API no gestiona claves: si se filtra, no puede crear otras para perpetuar el acceso."""
         if p.user_id.startswith("apikey:"):
@@ -534,6 +649,35 @@ def create_app(
             "note": "Percentiles del proceso actual sobre las últimas muestras; para series históricas usa Prometheus.",
         }
 
+    def _period(days: int):
+        from datetime import datetime, timedelta, timezone
+
+        days = max(1, min(days, 365))
+        return days, datetime.now(timezone.utc) - timedelta(days=days)
+
+    @app.get("/api/v1/usage")
+    async def api_usage(days: int = 30, p: Principal = Depends(authed("metrics:read"))):
+        """Consumo del periodo: minutos de audio, coste estimado y número de llamadas. Es una estimación, no una factura."""
+        days, since = _period(days)
+        usage = await app.state.db.usage_since(p.org_id, since)
+        stats = await app.state.db.call_analytics(p.org_id, since)
+        total = stats["calls"]["total"]
+        return {"period_days": days, "audio_minutes": round(usage["audio_seconds"] / 60, 2),
+                "estimated_cost_usd": usage["estimated_cost_usd"], "calls": total,
+                "cost_per_call_usd": round(usage["estimated_cost_usd"] / total, 4) if total else None,
+                "note": "Coste estimado del proveedor de voz; no incluye telefonía ni impuestos."}
+
+    @app.get("/api/v1/analytics")
+    async def api_analytics(days: int = 30, p: Principal = Depends(authed("metrics:read"))):
+        """Métricas comerciales: llamadas, atendidas, perdidas, transferencias, duración media, por día y por agente."""
+        days, since = _period(days)
+        stats = await app.state.db.call_analytics(p.org_id, since)
+        c = stats["calls"]
+        rates = {"answer_rate": round(c["answered"] / c["total"], 4) if c["total"] else None,
+                 "missed_rate": round(c["missed"] / c["total"], 4) if c["total"] else None,
+                 "transfer_rate": round(c["transferred"] / c["answered"], 4) if c["answered"] else None}
+        return {"period_days": days, **stats, "rates": rates}
+
     @app.get("/api/v1/audit-logs")
     async def audit_logs(limit: int = 200, p: Principal = Depends(authed("audit:read"))):
         return {"items": await app.state.db.list_audit(p.org_id, max(1, min(limit, 1000)))}
@@ -606,7 +750,7 @@ def create_app(
         try:
             await ws.accept()
             session = VoiceSession(
-                principal, make_provider(), registry, send, s, persistence=app.state.db,
+                principal, make_provider(), registry, send, s, persistence=app.state.db, webhooks=app.state.webhooks,
                 instructions=agent["instructions"] if agent else "Eres un agente de atención al cliente. Responde breve y usa herramientas para datos reales.",
                 allowed_tools=set(agent["tools"]) if agent and agent["tools"] else None,
                 on_close=on_close, options=options, recording_storage=storage, provider_factory=make_provider,

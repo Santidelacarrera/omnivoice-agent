@@ -62,6 +62,7 @@ class VoiceSession:
         recording_allowed: bool = False,
         transfer_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
         end_handler: Callable[[], Awaitable[None]] | None = None,
+        webhooks: Any = None,
         provider_factory: Callable[[], RealtimeProvider] | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
@@ -79,6 +80,7 @@ class VoiceSession:
         self.recording_storage = recording_storage
         # Derivación efectiva a un humano (p. ej. telefonía). Sin handler, `transfer_to_human` solo deja constancia.
         self.transfer_handler = transfer_handler
+        self.webhooks = webhooks  # emite eventos a los webhooks de la organización (opcional)
         self.end_handler = end_handler  # cuelga/cierra cuando el agente usa `end_call` (telefonía)
         # Se graba solo con las tres condiciones: almacenamiento configurado, política de la organización y consentimiento.
         self.recorder: StereoRecorder | None = (
@@ -470,6 +472,10 @@ class VoiceSession:
         duration_ms = round((time.monotonic() - started) * 1000)
         await self._audit("tool.executed", {"tool": ev["name"], "ok": result.get("ok"),
                                             "error": result.get("error"), "duration_ms": duration_ms})
+        if self.webhooks is not None:  # solo nombre, resultado y duración: nunca argumentos ni datos del cliente
+            await self.webhooks.emit(self.principal.org_id, "tool.executed", {
+                "session_id": self.id, "tool": ev["name"], "ok": bool(result.get("ok")), "error": result.get("error"),
+                "duration_ms": duration_ms})
         # No se guardan los argumentos crudos (pueden contener datos personales); solo claves.
         try:
             arg_keys = sorted(json.loads(ev["arguments"]).keys()) if isinstance(ev["arguments"], str) else sorted(ev["arguments"])
