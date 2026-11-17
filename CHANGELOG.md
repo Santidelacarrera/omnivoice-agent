@@ -5,6 +5,9 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). A
 ## [Sin publicar]
 
 ### Añadido
+- **Conocimiento (migración 016):** documentos PDF/DOCX/TXT/CSV con extracción segura (tipo por firma, límites anti zip-bomb, XML sin DTD), fragmentos con fuente, versiones, cuotas y búsqueda en español; página «Conocimiento» y herramienta `search_knowledge_base` (el contenido es dato, nunca instrucciones).
+- **Planes y cuotas (migración 017):** planes definidos en código sin precios, cuotas opt-in (`PLANS_ENFORCED`), consumo mensual, bloqueo, webhook `usage.alert` al 80 y 100 %, `GET /api/v1/plan`, CLI `set-plan`; margen solo si se configura un precio.
+- **Equipo (migración 018):** `GET/PUT/DELETE /api/v1/team`; reglas dentro de la base de datos (solo un owner toca owners, nunca sin owner); página «Equipo». La autenticación sigue siendo externa.
 - **Plataforma:** roles owner/admin/manager/operator/analyst/viewer; agentes versionados (editar, versiones, rollback, publicar, archivar, duplicar historial); números telefónicos únicos con agente y operador de transferencia por línea; alta de organizaciones y miembros por CLI de operador; migraciones con versión (`python -m app.migrate`); claves de API.
 - **Telefonía:** enrutado por número marcado; registro de llamadas con 11 estados e idempotencia; transferencia a humano con contexto efímero; finalización por API; llamadas salientes con consentimiento obligatorio, horario, reintentos, duplicados imposibles y lista de exclusión; contrato `TelephonyProvider`.
 - **IA y herramientas:** reglas base de plataforma; simulador de conversaciones sobre datos de demostración; confirmación explícita impuesta por el servidor; `modify_reservation`, `cancel_reservation`, `end_call`.

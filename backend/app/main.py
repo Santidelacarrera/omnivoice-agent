@@ -71,6 +71,11 @@ class PhoneNumberBody(BaseModel):
     transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
 
 
+class TeamRoleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str = Field(pattern=r"^(owner|admin|manager|operator|analyst|viewer)$")
+
+
 class KnowledgeSourceBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
@@ -524,6 +529,44 @@ def create_app(
 
     _status_route("publish", "published", "agent.published")
     _status_route("archive", "archived", "agent.archived")
+
+    # ---------- equipo ----------
+    def _team_http(exc) -> HTTPException:
+        return {"invalid_role": HTTPException(422, "Rol inválido"), "invalid_email": HTTPException(422, "Email inválido"),
+                "forbidden": HTTPException(403, "Permiso insuficiente"), "owner_only": HTTPException(403, "Solo un owner puede dar, quitar o cambiar el rol owner"),
+                "last_owner": HTTPException(409, "La organización no puede quedarse sin owner"),
+                "org_not_found": HTTPException(404, "Organización no encontrada")}.get(exc.code, HTTPException(400, "Operación no permitida"))
+
+    @app.get("/api/v1/team")
+    async def team_list(p: Principal = Depends(authed("team:read"))):
+        """Miembros de la organización. Ojo: la plataforma no autentica con esta lista; tu proveedor de identidad debe consultarla."""
+        return {"items": await app.state.db.team_list(p.org_id)}
+
+    @app.put("/api/v1/team/{email}")
+    async def team_set(email: str, body: TeamRoleBody, p: Principal = Depends(authed("team:write"))):
+        _humans_only(p)  # una clave de API no gestiona personas
+        from app.services.persistence import TeamError
+
+        try:
+            res = await app.state.db.team_set(p.org_id, email.strip(), body.role, p.role)
+        except TeamError as exc:
+            raise _team_http(exc) from None
+        await app.state.db.audit(p.org_id, p.user_id, "team.member_set", {"user_id": res["user_id"], "role": body.role, "previous": res.get("previous")})
+        return {"email": email.strip().lower(), **res}
+
+    @app.delete("/api/v1/team/{email}", status_code=204)
+    async def team_remove(email: str, p: Principal = Depends(authed("team:write"))):
+        _humans_only(p)
+        from app.services.persistence import TeamError
+
+        try:
+            removed = await app.state.db.team_remove(p.org_id, email.strip(), p.role)
+        except TeamError as exc:
+            raise _team_http(exc) from None
+        if not removed:
+            raise HTTPException(404, "Miembro no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "team.member_removed", {"email_hash": __import__("hashlib").sha256(email.strip().lower().encode()).hexdigest()[:12]})
+        return Response(status_code=204)
 
     # ---------- base de conocimiento ----------
     def _kb_prepare(body: KnowledgeSourceBody):

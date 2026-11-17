@@ -47,3 +47,6 @@ Un módulo no se da por terminado por existir su código: lleva pruebas unitaria
 - **Evaluaciones conversacionales:** ver `docs/RUNBOOK.md`; `tests/test_evals.py` comprueba que cada comprobación detecta el fallo que dice detectar.
 - **SDK:** `tests/test_sdk.py` ejecuta el SDK de Python contra la API real en memoria.
 - **Playwright en local:** la primera vez `npx playwright install chromium` (descarga unos 90 MB).
+
+## Conocimiento, planes y equipo
+`tests/test_knowledge.py`, `test_plans.py`, `test_team.py` (memoria) y `tests/integration/test_*_pg.py` (PostgreSQL y Redis reales). Ejecuta las integraciones con `TEST_DATABASE_URL`, `TEST_ADMIN_DATABASE_URL` y `TEST_REDIS_URL` exportadas. `test_full_stack.py` exige una base limpia (`delete from tool_executions; delete from sessions;`). Última ejecución completa: 482 pasan, 89–90 % de cobertura.
