@@ -340,3 +340,56 @@ def test_poll_loop_start_stop():
 
     run(go())
     assert time.time() > 0
+
+
+# ---------- mantenimiento ----------
+def drive_to_failure(svc, start, steps=12):
+    now = start
+    for _ in range(steps):
+        now += timedelta(days=1)  # cada vuelta vence cualquier espera de reintento
+        run(svc.tick(now))
+    return now
+
+
+def test_endpoint_with_a_streak_of_failures_is_disabled_automatically():
+    c, rec = app_with(Receiver(status=500), webhook_disable_after_failures=2)
+    hook = create(c)
+    svc = c.app.state.webhooks
+    run(svc.emit(ORG, "call.failed", {"n": 1}))
+    run(svc.emit(ORG, "call.failed", {"n": 2}))
+    drive_to_failure(svc, datetime.now(timezone.utc))
+    assert [d["status"] for d in c.app.state.db.webhook_deliveries] == ["failed", "failed"]
+    assert c.get("/api/v1/webhooks", headers=h()).json()["items"][0]["active"] is False
+    assert any(e["action"] == "webhook.auto_disabled" for e in c.get("/api/v1/audit-logs", headers=h()).json()["items"])
+    assert run(svc.emit(ORG, "call.failed", {"n": 3})) == 0  # desactivado: ya no se le encola nada
+    assert c.patch(f"/api/v1/webhooks/{hook['id']}", json={"active": True}, headers=h()).json()["active"] is True  # y se puede reactivar
+
+
+def test_a_success_in_the_streak_prevents_auto_disable():
+    rec = Receiver()
+    c, _ = app_with(rec, webhook_disable_after_failures=2)
+    create(c)
+    svc = c.app.state.webhooks
+    run(svc.emit(ORG, "call.failed", {"n": 1}))
+    run(svc.tick())  # entregado
+    rec.status = 500
+    run(svc.emit(ORG, "call.failed", {"n": 2}))
+    drive_to_failure(svc, datetime.now(timezone.utc))
+    assert [d["status"] for d in c.app.state.db.webhook_deliveries] == ["delivered", "failed"]
+    assert c.get("/api/v1/webhooks", headers=h()).json()["items"][0]["active"] is True
+
+
+def test_purge_removes_only_old_finished_deliveries():
+    c, _ = app_with(webhook_retention_days=14)
+    create(c)
+    svc, db = c.app.state.webhooks, c.app.state.db
+    for i in range(4):
+        run(svc.emit(ORG, "call.failed", {"n": i}))
+    old_done, old_pending, new_done, old_failed = db.webhook_deliveries
+    old_done.update(status="delivered", created_at=time.time() - 20 * 86400)
+    old_pending.update(status="pending", created_at=time.time() - 20 * 86400)  # pendiente: no se toca aunque sea vieja
+    new_done.update(status="delivered", created_at=time.time() - 2 * 86400)
+    old_failed.update(status="failed", created_at=time.time() - 30 * 86400)
+    assert run(svc.purge()) == 2
+    assert [d["status"] for d in db.webhook_deliveries] == ["pending", "delivered"]
+    assert run(svc.purge()) == 0

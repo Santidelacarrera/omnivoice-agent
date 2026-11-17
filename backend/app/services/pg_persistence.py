@@ -591,6 +591,19 @@ class PostgresPersistence:
                                      "last_error = :e, claimed_at = NULL WHERE id = :i AND org_id = :o"),
                                 {"s": status, "e": error, "i": delivery_id, "o": org_id})
 
+    async def disable_webhook_if_failing(self, org_id, webhook_id, threshold):
+        async with org_transaction(org_id) as c:
+            n = (await c.execute(
+                text("UPDATE webhook_endpoints SET active = false WHERE id = :i AND org_id = :o AND active AND "
+                     "(SELECT count(*) FROM (SELECT status FROM webhook_deliveries WHERE endpoint_id = :i ORDER BY id DESC LIMIT :n) t "
+                     "WHERE t.status = 'failed') = :n"), {"i": webhook_id, "o": org_id, "n": threshold})).rowcount
+        return bool(n)
+
+    async def purge_webhook_deliveries(self, cutoff):
+        """Purga global (todas las organizaciones) vía la función SECURITY DEFINER de la migración 013."""
+        async with get_engine().begin() as c:
+            return int((await c.execute(text("SELECT purge_webhook_deliveries(:c)"), {"c": cutoff})).scalar() or 0)
+
     async def list_webhook_deliveries(self, org_id, webhook_id, limit=50):
         async with org_transaction(org_id) as c:
             rows = (await c.execute(

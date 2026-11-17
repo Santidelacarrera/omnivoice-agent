@@ -119,6 +119,11 @@ class WebhookService:
             nxt = now + timedelta(seconds=BACKOFF_S[attempt - 1])
         WEBHOOK_DELIVERIES.labels("delivered" if ok else "retry" if nxt else "failed").inc()
         await self.db.finish_webhook_delivery(job["org_id"], job["id"], ok, status, error, nxt)
+        if not ok and nxt is None:  # entrega agotada: si el endpoint lleva una racha de fallos, se desactiva para no seguir golpeándolo
+            if await self.db.disable_webhook_if_failing(job["org_id"], job["endpoint_id"], self.s.webhook_disable_after_failures):
+                WEBHOOK_DELIVERIES.labels("endpoint_disabled").inc()
+                await self.db.audit(job["org_id"], "system", "webhook.auto_disabled",
+                                    {"webhook_id": job["endpoint_id"], "after_failures": self.s.webhook_disable_after_failures})
 
     async def _deliver(self, job: dict[str, Any], now: datetime) -> None:
         try:
@@ -148,11 +153,21 @@ class WebhookService:
             return await self._finish(job, now, True, r.status_code, None)
         await self._finish(job, now, False, r.status_code, f"http_{r.status_code}")  # no se guarda el cuerpo de la respuesta
 
+    # ---------- mantenimiento ----------
+    async def purge(self, now: datetime | None = None) -> int:
+        """Borra las entregas terminadas más antiguas que `webhook_retention_days` (el historial no crece sin límite)."""
+        now = now or datetime.now(timezone.utc)
+        return await self.db.purge_webhook_deliveries(now - timedelta(days=self.s.webhook_retention_days))
+
     # ---------- ciclo ----------
     async def _loop(self) -> None:
+        last_purge = 0.0
         while True:
             try:
                 await self.tick()
+                if time.monotonic() - last_purge > 3600:  # como mucho una vez por hora
+                    last_purge = time.monotonic()
+                    await self.purge()
             except Exception:  # noqa: BLE001
                 log.exception("webhook_tick_failed")
                 ERRORS.labels("webhook_tick").inc()

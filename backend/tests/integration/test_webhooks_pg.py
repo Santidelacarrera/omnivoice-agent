@@ -118,3 +118,39 @@ def test_claim_is_atomic_across_concurrent_workers_and_recovers_stale():
         again = c.portal.call(db.claim_due_webhook_deliveries, now + timedelta(seconds=400), 50, 300)
         assert {j["id"] for j in again} == set(claimed)  # lo abandonado "enviando" se recupera
         c.delete(f"/api/v1/webhooks/{hook['id']}", headers=_h(DEMO))
+
+
+def test_auto_disable_and_purge_on_postgres():
+    if not ADMIN_URL:
+        pytest.skip("requiere TEST_ADMIN_DATABASE_URL")
+    rec = Receiver()
+    with _app(rec) as c:
+        _drain(c)
+        db = c.app.state.db
+        hook = c.post("/api/v1/webhooks", headers=_h(DEMO), json={"url": URL}).json()
+        for i in range(3):
+            c.portal.call(c.app.state.webhooks.emit, DEMO, "call.failed", {"n": i})
+
+        async def admin(sql, **params):
+            eng = create_async_engine(ADMIN_URL)
+            try:
+                async with eng.begin() as conn:
+                    return (await conn.execute(text(sql), params)).rowcount
+            finally:
+                await eng.dispose()
+
+        # las dos últimas fallan, la primera sigue pendiente: aún no hay racha de 2 fallidas seguidas... salvo las dos últimas
+        asyncio.run(admin("UPDATE webhook_deliveries SET status = 'failed' WHERE endpoint_id = :e AND id IN "
+                          "(SELECT id FROM webhook_deliveries WHERE endpoint_id = :e ORDER BY id DESC LIMIT 2)", e=hook["id"]))
+        assert c.portal.call(db.disable_webhook_if_failing, DEMO, hook["id"], 3) is False  # la más antigua no falló: no hay racha de 3
+        assert c.portal.call(db.disable_webhook_if_failing, DEMO, hook["id"], 2) is True
+        assert c.get("/api/v1/webhooks", headers=_h(DEMO)).json()["items"][0]["active"] is False
+        assert c.portal.call(db.disable_webhook_if_failing, DEMO, hook["id"], 2) is False  # ya desactivado
+
+        # purga: solo lo terminado y antiguo
+        asyncio.run(admin("UPDATE webhook_deliveries SET created_at = now() - interval '30 days' WHERE endpoint_id = :e AND status = 'failed'", e=hook["id"]))
+        removed = c.portal.call(db.purge_webhook_deliveries, datetime.now(timezone.utc) - timedelta(days=14))
+        assert removed >= 2
+        left = c.get(f"/api/v1/webhooks/{hook['id']}/deliveries", headers=_h(DEMO)).json()["items"]
+        assert [d["status"] for d in left] == ["pending"]  # la pendiente sobrevive
+        c.delete(f"/api/v1/webhooks/{hook['id']}", headers=_h(DEMO))

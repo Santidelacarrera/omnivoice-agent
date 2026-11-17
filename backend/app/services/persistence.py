@@ -107,6 +107,8 @@ class Persistence(Protocol):
     async def finish_webhook_delivery(self, org_id: str, delivery_id: int, ok: bool, status: int | None, error: str | None,
                                       next_attempt_at: datetime | None) -> None: ...
     async def list_webhook_deliveries(self, org_id: str, webhook_id: str, limit: int = 50) -> list[dict[str, Any]]: ...
+    async def disable_webhook_if_failing(self, org_id: str, webhook_id: str, threshold: int) -> bool: ...
+    async def purge_webhook_deliveries(self, cutoff: datetime) -> int: ...
     async def create_api_key(self, org_id: str, name: str, prefix: str, key_hash: str, role: str, created_by: str | None,
                              expires_at: datetime | None) -> dict[str, Any]: ...
     async def list_api_keys(self, org_id: str) -> list[dict[str, Any]]: ...
@@ -544,6 +546,22 @@ class InMemoryPersistence:
             d["status"], d["next_attempt_at"] = "pending", next_attempt_at
         else:
             d["status"] = "failed"
+
+    async def disable_webhook_if_failing(self, org_id, webhook_id, threshold):
+        w = self.webhooks.get(webhook_id)
+        if not w or w["org_id"] != org_id or not w["active"]:
+            return False
+        last = sorted((d for d in self.webhook_deliveries if d["endpoint_id"] == webhook_id), key=lambda d: d["id"], reverse=True)[:threshold]
+        if len(last) == threshold and all(d["status"] == "failed" for d in last):
+            w["active"] = False
+            return True
+        return False
+
+    async def purge_webhook_deliveries(self, cutoff):
+        keep = [d for d in self.webhook_deliveries if not (d["status"] in ("delivered", "failed") and d["created_at"] < cutoff.timestamp())]
+        n = len(self.webhook_deliveries) - len(keep)
+        self.webhook_deliveries[:] = keep
+        return n
 
     async def list_webhook_deliveries(self, org_id, webhook_id, limit=50):
         rows = [d for d in self.webhook_deliveries if d["org_id"] == org_id and d["endpoint_id"] == webhook_id]

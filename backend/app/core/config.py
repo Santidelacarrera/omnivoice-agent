@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     webhook_timeout_s: float = 5.0
     webhook_stale_claim_seconds: int = 300
     webhooks_max_per_org: int = 10
+    webhook_disable_after_failures: int = 10  # entregas fallidas seguidas tras las que el endpoint se desactiva solo
+    webhook_retention_days: int = 14  # las entregas terminadas (entregadas o fallidas) se purgan pasado este plazo
     simulate_per_minute: int = 10  # simulaciones de agente por organización y minuto (cada una consume el modelo)
     human_transfer_number: str = ""  # número E.164 del operador/cola humana
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
