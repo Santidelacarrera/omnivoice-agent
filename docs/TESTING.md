@@ -38,7 +38,8 @@ Un módulo no se da por terminado por existir su código: lleva pruebas unitaria
 - No mezcles `now()` de PostgreSQL con el reloj de la aplicación en lógica de colas (la deriva de Docker rompe la comparación).
 
 ## Estado actual
-364 pruebas con PostgreSQL y Redis reales, cobertura combinada 88 %. Falta: pruebas de carga con umbral en CI, pruebas de recuperación (caída de Redis/PostgreSQL a mitad de llamada), pruebas de interfaz y pruebas con proveedores reales de telefonía.
+436 pruebas Python con PostgreSQL y Redis reales (cobertura combinada 89 %) y 6 pruebas de interfaz con Playwright. Falta: pruebas con proveedores reales de telefonía, de voz y de SMS; pruebas de carga con tráfico real (las de CI miden solo nuestro código con proveedor simulado); ejecución de las evaluaciones con el modelo real; pruebas de recuperación con Redis o PostgreSQL reales apagados (hoy se simulan).
+
 ## Añadido después
 - **Interfaz (Playwright):** `cd frontend && npm run e2e`. Levanta un backend real en memoria y el frontend compilado, y recorre el asistente de 9 pasos, números, salientes, integraciones y auditoría. Estas pruebas encontraron dos fallos reales (el CORS bloqueaba PATCH, PUT y DELETE desde el navegador y el cliente fallaba con las respuestas 204). En CI corren en el job `frontend`.
 - **Recuperación:** `tests/test_recovery.py` simula la caída de Redis (un almacén que lanza el error real) y de PostgreSQL (puerto sin servidor) con llamadas en curso, y prueba el cortacircuitos.

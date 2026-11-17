@@ -11,7 +11,7 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). A
 - **API:** `GET /usage`, `GET /analytics`; webhooks salientes firmados con cola, reintentos, secreto cifrado, protección SSRF, desactivación automática y purga.
 - **Panel:** páginas de Llamadas y Números; analítica de 30 días en el Panel.
 - **Calidad:** cobertura con umbral del 80 % en CI; pruebas de integración contra PostgreSQL y Redis reales; documentación (`API_DOCUMENTATION`, `DATABASE_SCHEMA`, `SECURITY`, `TESTING`, `TELEPHONY_INTEGRATION`, `AI_ORCHESTRATION`, `CONTRIBUTING`) y auditoría técnica con roadmap.
-- Migraciones 005 a 013.
+- Migraciones 005 a 015.
 
 - **Herramientas del agente:** reconocer a quien llama, registrar cliente, consultar pedidos y SMS de confirmación solo al número de quien llama (migración 015); API para importar pedidos y suprimir clientes.
 - **API y SDK:** `POST /api/v1/calls` y SDK de Python.
@@ -34,5 +34,5 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). A
 
 ### Conocido
 - La confirmación de acciones verifica que el usuario respondió, no qué respondió.
-- La telefonía solo se probó con Twilio simulado; el simulador, con un modelo de prueba; el panel no tiene pruebas automáticas de interfaz.
+- La telefonía solo se probó con Twilio simulado y el SMS con un doble de pruebas; el simulador y las evaluaciones offline, con un modelo de prueba (las evaluaciones con el modelo real son un workflow manual aún sin ejecutar); Sentry y OpenTelemetry, con módulos falsos.
 - Falta: MFA, base de conocimiento con documentos, facturación, asistente de creación de agentes, infraestructura de staging/producción y piloto (ver el roadmap).
