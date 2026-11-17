@@ -132,11 +132,12 @@ class PostgresRepository:
         """Consulta «cualquiera de las palabras» (OR): una pregunta en lenguaje natural trae palabras que el documento no usa, y con AND
         (plainto_tsquery) no encontraría nada. Cada palabra pasa por `plainto_tsquery` como parámetro, así que no hay inyección ni errores
         de sintaxis; las palabras vacías (artículos, preposiciones) producen una consulta vacía que no aporta nada."""
-        import re
+        from app.knowledge.expand import expand
 
-        words = list(dict.fromkeys(w.lower() for w in re.findall(r"\w{3,}", query, re.UNICODE)))[:8]
-        expr = " || ".join(f"plainto_tsquery('spanish', :w{i})" for i in range(len(words))) or "plainto_tsquery('spanish', '')"
-        return expr, {f"w{i}": w for i, w in enumerate(words)}
+        terms = expand(query)  # solo [a-z0-9]+ y un `*` final: seguros como parámetros
+        parts = [f"to_tsquery('spanish', :w{i})" if t.endswith("*") else f"plainto_tsquery('spanish', :w{i})" for i, t in enumerate(terms)]
+        params = {f"w{i}": (t[:-1] + ":*" if t.endswith("*") else t) for i, t in enumerate(terms)}
+        return (" || ".join(parts) or "plainto_tsquery('spanish', '')"), params
 
     async def search_kb(self, org_id: str, query: str) -> list[dict[str, Any]]:
         """Documentos (fragmentos con fuente) y filas heredadas de `knowledge_base`, ordenados por relevancia."""

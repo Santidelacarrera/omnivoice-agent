@@ -224,6 +224,12 @@ def create_app(
     from app.billing.plans import Plans, QuotaExceeded
 
     app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
+    from app.knowledge import expand as _kb_expand
+
+    try:
+        _kb_expand.configure(json.loads(s.kb_synonyms_json) if s.kb_synonyms_json else None)
+    except (ValueError, TypeError):
+        raise RuntimeError("KB_SYNONYMS_JSON debe ser una lista de listas de palabras") from None
     app.state.plans = Plans(s, lambda: app.state.db, lambda: app.state.store, lambda: app.state.repo, lambda: app.state.webhooks)
     registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
 

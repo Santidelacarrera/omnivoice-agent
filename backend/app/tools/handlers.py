@@ -175,14 +175,17 @@ class InMemoryRepository:
         return len(mine), sum(s["chunk_count"] for s in mine)
 
     async def search_kb(self, org_id, query):
-        words = {w for w in _norm_words(query) if len(w) > 2}
+        from app.knowledge.expand import expand, matches, words
+
+        terms = expand(query)
         scored = []
         for sid, chunks in self.kb_chunks.items():
             s = self.kb_sources[sid]
             if s["org_id"] != org_id:
                 continue
             for i, text in enumerate(chunks):
-                score = len(words & set(_norm_words(text)))
+                doc = set(words(text))
+                score = sum(matches(t, doc) for t in terms)
                 if score:
                     scored.append((score, s["name"], sid, i, text))
         scored.sort(key=lambda r: (-r[0], r[1], r[3]))

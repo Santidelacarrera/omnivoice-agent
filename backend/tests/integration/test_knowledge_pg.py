@@ -40,6 +40,10 @@ def test_knowledge_lifecycle_search_and_isolation_on_postgres():
             hits = c.get("/api/v1/knowledge/search", params={"q": q}, headers=_h(DEMO)).json()["results"]
             assert any(h.get("source_id") == src["id"] for h in hits), q
         assert not c.get("/api/v1/knowledge/search", params={"q": "criptomonedas obsidiana"}, headers=_h(DEMO)).json()["results"]
+        # variantes de otra raíz y sinónimos (expansión de la consulta): «devolver»/«reembolso» llegan a «devoluciones»
+        for q in ("¿puedo devolver un producto?", "quiero un reembolso", "cuánto cuesta el despacho"):
+            hits = c.get("/api/v1/knowledge/search", params={"q": q}, headers=_h(DEMO)).json()["results"]
+            assert any(h.get("source_id") == src["id"] for h in hits), q
 
         # otra organización: ni lo ve, ni lo busca, ni lo toca (RLS)
         assert c.get("/api/v1/knowledge/sources", headers=_h(OTHER)).json()["items"] == []

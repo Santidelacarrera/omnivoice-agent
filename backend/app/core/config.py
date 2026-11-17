@@ -143,6 +143,7 @@ class Settings(BaseSettings):
     otel_service_name: str = "omnivoice-backend"
     kb_max_sources: int = 200  # documentos por organización
     kb_max_chunks: int = 20000  # fragmentos por organización (acota almacenamiento y coste de búsqueda)
+    kb_synonyms_json: str = ""  # [["devolver", "cambio"], ...]: grupos de sinónimos de la empresa para la búsqueda de conocimiento
     plans_enforced: bool = False  # True = se rechaza lo que exceda el plan; False = solo se mide y se muestra
     default_plan: str = "starter"
     plan_limits_json: str = ""  # sobrescribe límites por plan, p. ej. {"starter": {"minutes_per_month": 100}}
