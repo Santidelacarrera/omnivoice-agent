@@ -45,7 +45,8 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] Ingesta PDF/DOCX/TXT/CSV, fragmentos, embeddings (pgvector), citas, versionado.
 
 ## ETAPA 8 — Seguridad y privacidad
-- [ ] MFA, API keys con hash, cifrado de credenciales de integraciones, rotación, SAST en CI.
+- [x] API keys (`ovk_<prefijo>_<secreto>`, solo hash SHA-256, mostradas una vez, rol acotado al del creador y nunca owner, vencimiento, revocación, una clave no gestiona claves; migración 011).
+- [ ] Pendiente: MFA y recuperación de cuentas (la identidad es externa: se resuelve en el proveedor de identidad o con un módulo de usuarios propio, decisión de producto), cifrado de credenciales de integraciones (aún no hay integraciones), rotación de secretos, SAST/DAST en CI.
 
 ## ETAPA 9 — Analítica y facturación
 - [ ] `subscriptions`, `invoices`, cuotas por plan, margen por organización, Grafana, OpenTelemetry, Sentry.

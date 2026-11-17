@@ -25,6 +25,10 @@ _VERSIONED = ("name", "instructions", "tools", "voice", "language")
 ACTIVE_JOB_STATES = ("SCHEDULED", "DIALING")
 
 
+class ApiKeyPrefixTaken(Exception):
+    """Colisión del prefijo aleatorio (muy improbable): se genera otra clave."""
+
+
 class OutboundRejected(Exception):
     """El trabajo saliente no se crea: `reason` = do_not_call | duplicate_active."""
 
@@ -89,6 +93,12 @@ class Persistence(Protocol):
     async def add_dnc(self, org_id: str, number_hash: str, reason: str | None, by: str | None) -> dict[str, Any]: ...
     async def list_dnc(self, org_id: str) -> list[dict[str, Any]]: ...
     async def is_do_not_call(self, org_id: str, number_hash: str) -> bool: ...
+    async def create_api_key(self, org_id: str, name: str, prefix: str, key_hash: str, role: str, created_by: str | None,
+                             expires_at: datetime | None) -> dict[str, Any]: ...
+    async def list_api_keys(self, org_id: str) -> list[dict[str, Any]]: ...
+    async def revoke_api_key(self, org_id: str, key_id: str) -> bool: ...
+    async def resolve_api_key(self, prefix: str) -> dict[str, Any] | None: ...
+    async def touch_api_key(self, org_id: str, key_id: str) -> None: ...
     async def remove_dnc(self, org_id: str, dnc_id: str) -> bool: ...
     async def org_policy(self, org_id: str) -> dict[str, Any]: ...
     async def set_conversation_options(self, org_id: str, conversation_id: str, *, recording_consent: bool,
@@ -106,6 +116,7 @@ class InMemoryPersistence:
         self.calls: dict[str, dict[str, Any]] = {}
         self.call_events: list[dict[str, Any]] = []
         self.jobs: dict[str, dict[str, Any]] = {}
+        self.api_keys: dict[str, dict[str, Any]] = {}
         self.dnc: dict[str, dict[str, Any]] = {}
         self.audits: list[dict[str, Any]] = []
         self.convs: dict[str, dict[str, Any]] = {}
@@ -370,6 +381,45 @@ class InMemoryPersistence:
                 self._finish(j, "CANCELLED", datetime.now(timezone.utc))
                 j["last_result"] = "do_not_call"
         return {**self.dnc[did], "created": True}
+
+    # ---- claves de API ----
+    @staticmethod
+    def _public_key(k):
+        return {"id": k["id"], "name": k["name"], "prefix": k["prefix"], "role": k["role"], "created_by": k["created_by"],
+                "created_at": k["created_at"], "last_used_at": k["last_used_at"],
+                "expires_at": k["expires_at"].timestamp() if k["expires_at"] else None, "revoked": k["revoked_at"] is not None}
+
+    async def create_api_key(self, org_id, name, prefix, key_hash, role, created_by, expires_at):
+        if any(k["prefix"] == prefix for k in self.api_keys.values()):
+            raise ApiKeyPrefixTaken(prefix)
+        kid = str(uuid.uuid4())
+        self.api_keys[kid] = {"id": kid, "org_id": org_id, "name": name, "prefix": prefix, "key_hash": key_hash, "role": role,
+                              "created_by": created_by, "created_at": time.time(), "last_used_at": None,
+                              "expires_at": expires_at, "revoked_at": None}
+        return self._public_key(self.api_keys[kid])
+
+    async def list_api_keys(self, org_id):
+        rows = sorted((k for k in self.api_keys.values() if k["org_id"] == org_id), key=lambda k: k["created_at"], reverse=True)
+        return [self._public_key(k) for k in rows]
+
+    async def revoke_api_key(self, org_id, key_id):
+        k = self.api_keys.get(key_id)
+        if not k or k["org_id"] != org_id:
+            return False
+        k["revoked_at"] = k["revoked_at"] or datetime.now(timezone.utc)
+        return True
+
+    async def resolve_api_key(self, prefix):
+        k = next((k for k in self.api_keys.values() if k["prefix"] == prefix), None)
+        if not k:
+            return None
+        return {"id": k["id"], "org_id": k["org_id"], "key_hash": k["key_hash"], "role": k["role"],
+                "expires_at": k["expires_at"].timestamp() if k["expires_at"] else None, "revoked": k["revoked_at"] is not None}
+
+    async def touch_api_key(self, org_id, key_id):
+        k = self.api_keys.get(key_id)
+        if k and k["org_id"] == org_id:
+            k["last_used_at"] = time.time()
 
     async def is_do_not_call(self, org_id, number_hash):
         return any(d["org_id"] == org_id and d["number_hash"] == number_hash for d in self.dnc.values())

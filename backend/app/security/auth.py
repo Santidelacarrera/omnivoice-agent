@@ -3,16 +3,17 @@ import uuid
 from dataclasses import dataclass
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import get_settings
+from app.security import apikeys
 
 bearer = HTTPBearer(auto_error=False)
 
 _READ = {"agents:read", "conversations:read", "metrics:read", "calls:read"}
 _FULL = {*_READ, "conversations:delete", "agents:write", "agents:publish", "audit:read", "session:create",
-         "recordings:read", "telephony:call", "phones:read", "phones:write", "outbound:write"}
+         "recordings:read", "telephony:call", "phones:read", "phones:write", "outbound:write", "apikeys:write"}
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "owner": set(_FULL),
     "admin": set(_FULL),
@@ -59,9 +60,30 @@ def decode_token(token: str) -> Principal:
     return Principal(user_id=data["sub"], org_id=data["org"], role=data["role"])
 
 
-async def current_principal(creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Principal:
+async def principal_from_api_key(request: Request, token: str) -> Principal:
+    bad = HTTPException(status.HTTP_401_UNAUTHORIZED, "Credencial inválida")  # mismo mensaje para cualquier causa
+    prefix = apikeys.parse_prefix(token)
+    if prefix is None:
+        raise bad
+    db = request.app.state.db
+    row = await db.resolve_api_key(prefix)
+    if not row or not apikeys.verify(token, row["key_hash"], row["expires_at"], row["revoked"]):
+        raise bad
+    if row["role"] not in ROLE_PERMISSIONS or row["role"] == "owner":
+        raise bad
+    try:  # marca de último uso, como mucho una vez por minuto y nunca rompe la petición
+        if await request.app.state.store.hit("apikey-touch", row["id"], 1, 60):
+            await db.touch_api_key(row["org_id"], row["id"])
+    except Exception:  # noqa: BLE001
+        pass
+    return Principal(user_id=f"apikey:{row['id']}", org_id=row["org_id"], role=row["role"])
+
+
+async def current_principal(request: Request, creds: HTTPAuthorizationCredentials | None = Depends(bearer)) -> Principal:
     if creds is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Falta credencial")
+    if creds.credentials.startswith(apikeys.KEY_PREFIX):
+        return await principal_from_api_key(request, creds.credentials)
     return decode_token(creds.credentials)
 
 

@@ -9,7 +9,13 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database.engine import get_engine, org_transaction
 from app.observability.metrics import ERRORS
-from app.services.persistence import _VERSIONED, COST_PER_AUDIO_MINUTE_USD, OutboundRejected, PhoneNumberTaken
+from app.services.persistence import (
+    _VERSIONED,
+    COST_PER_AUDIO_MINUTE_USD,
+    ApiKeyPrefixTaken,
+    OutboundRejected,
+    PhoneNumberTaken,
+)
 from app.telephony.call_state import can_transition, is_terminal
 
 log = structlog.get_logger()
@@ -465,6 +471,47 @@ class PostgresPersistence:
                                  "last_result = 'do_not_call' WHERE org_id = :o AND number_hash = :h AND status = 'SCHEDULED'"),
                             {"o": org_id, "h": number_hash})
         return {"id": str(row[0]), "number_hash": number_hash, "reason": reason, "created_at": row[1].timestamp(), "created": created}
+
+    # ---- claves de API ----
+    async def create_api_key(self, org_id, name, prefix, key_hash, role, created_by, expires_at):
+        try:
+            async with org_transaction(org_id) as c:
+                r = (await c.execute(
+                    text("INSERT INTO api_keys (org_id, name, prefix, key_hash, role, created_by, expires_at) "
+                         "VALUES (:o, :n, :p, :h, :r, :b, :e) RETURNING id, created_at"),
+                    {"o": org_id, "n": name, "p": prefix, "h": key_hash, "r": role, "b": created_by, "e": expires_at})).first()
+        except IntegrityError as exc:
+            raise ApiKeyPrefixTaken(prefix) from exc
+        return {"id": str(r[0]), "name": name, "prefix": prefix, "role": role, "created_by": created_by,
+                "created_at": r[1].timestamp(), "last_used_at": None,
+                "expires_at": expires_at.timestamp() if expires_at else None, "revoked": False}
+
+    async def list_api_keys(self, org_id):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT id, name, prefix, role, created_by, created_at, last_used_at, expires_at, revoked_at "
+                                         "FROM api_keys WHERE org_id = :o ORDER BY created_at DESC"), {"o": org_id})).all()
+        ts = lambda v: v.timestamp() if v else None  # noqa: E731
+        return [{"id": str(r[0]), "name": r[1], "prefix": r[2], "role": r[3], "created_by": r[4], "created_at": ts(r[5]),
+                 "last_used_at": ts(r[6]), "expires_at": ts(r[7]), "revoked": r[8] is not None} for r in rows]
+
+    async def revoke_api_key(self, org_id, key_id):
+        async with org_transaction(org_id) as c:
+            return bool((await c.execute(text("UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now()) WHERE id = :i AND org_id = :o"),
+                                         {"i": key_id, "o": org_id})).rowcount)
+
+    async def resolve_api_key(self, prefix):
+        """Búsqueda global por prefijo (la organización aún no se conoce) vía la función SECURITY DEFINER de la migración 011."""
+        async with get_engine().connect() as c:
+            r = (await c.execute(text("SELECT id, org_id, key_hash, role, expires_at, revoked_at FROM resolve_api_key(:p)"),
+                                 {"p": prefix})).first()
+        if not r:
+            return None
+        return {"id": str(r[0]), "org_id": str(r[1]), "key_hash": r[2], "role": r[3],
+                "expires_at": r[4].timestamp() if r[4] else None, "revoked": r[5] is not None}
+
+    async def touch_api_key(self, org_id, key_id):
+        async with org_transaction(org_id) as c:
+            await c.execute(text("UPDATE api_keys SET last_used_at = now() WHERE id = :i AND org_id = :o"), {"i": key_id, "o": org_id})
 
     async def is_do_not_call(self, org_id, number_hash):
         async with org_transaction(org_id) as c:

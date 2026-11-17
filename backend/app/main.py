@@ -19,7 +19,7 @@ from app.observability.metrics import BARGE_WINDOW, BUDGET_REJECTED, COST_WINDOW
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.realtime.provider import FakeProvider, OpenAIRealtimeProvider, RealtimeProvider
 from app.security.auth import Principal, issue_token, require
-from app.services.persistence import InMemoryPersistence, Persistence, PhoneNumberTaken
+from app.services.persistence import ApiKeyPrefixTaken, InMemoryPersistence, Persistence, PhoneNumberTaken
 from app.services.recordings import RecordingStorage, build_storage
 from app.services.retention import InMemoryRetentionBackend, RetentionBackend, RetentionJob
 from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore
@@ -69,6 +69,13 @@ class PhoneNumberBody(BaseModel):
     e164: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$")
     agent_id: str | None = None
     transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
+
+
+class CreateApiKeyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=2, max_length=80)
+    role: str = Field(default="viewer", pattern=r"^(admin|manager|operator|analyst|viewer)$")
+    expires_in_days: int | None = Field(default=None, ge=1, le=730)
 
 
 class UpdatePhoneBody(BaseModel):
@@ -435,6 +442,49 @@ def create_app(
 
     _status_route("publish", "published", "agent.published")
     _status_route("archive", "archived", "agent.archived")
+
+    def _humans_only(p: Principal) -> None:
+        """Una clave de API no gestiona claves: si se filtra, no puede crear otras para perpetuar el acceso."""
+        if p.user_id.startswith("apikey:"):
+            raise HTTPException(403, "Las claves de API no pueden gestionar claves")
+
+    @app.post("/api/v1/api-keys", status_code=201)
+    async def create_api_key(body: CreateApiKeyBody, p: Principal = Depends(authed("apikeys:write"))):
+        """Crea una clave para integraciones. La clave completa se devuelve **una sola vez**; después solo se ve su prefijo."""
+        _humans_only(p)
+        from datetime import datetime, timedelta, timezone
+
+        from app.security import apikeys
+        from app.security.auth import ROLE_PERMISSIONS
+
+        # Nadie entrega más poder del que tiene: una clave no puede superar los permisos de quien la crea.
+        if not ROLE_PERMISSIONS[body.role] <= ROLE_PERMISSIONS.get(p.role, set()):
+            raise HTTPException(403, "No puedes crear una clave con más permisos que tu propio rol")
+        expires = datetime.now(timezone.utc) + timedelta(days=body.expires_in_days) if body.expires_in_days else None
+        for _ in range(5):
+            key, prefix, key_hash = apikeys.generate()
+            try:
+                created = await app.state.db.create_api_key(p.org_id, body.name, prefix, key_hash, body.role, p.user_id, expires)
+                break
+            except ApiKeyPrefixTaken:
+                continue
+        else:
+            raise HTTPException(503, "No se pudo generar la clave; inténtalo de nuevo")
+        await app.state.db.audit(p.org_id, p.user_id, "apikey.created", {"key_id": created["id"], "role": body.role, "prefix": prefix})
+        return {**created, "key": key, "warning": "Guarda esta clave ahora: no se vuelve a mostrar."}
+
+    @app.get("/api/v1/api-keys")
+    async def list_api_keys(p: Principal = Depends(authed("apikeys:write"))):
+        _humans_only(p)
+        return {"items": await app.state.db.list_api_keys(p.org_id)}
+
+    @app.delete("/api/v1/api-keys/{key_id}", status_code=204)
+    async def revoke_api_key(key_id: str, p: Principal = Depends(authed("apikeys:write"))):
+        _humans_only(p)
+        if not await app.state.db.revoke_api_key(p.org_id, _valid_id(key_id)):
+            raise HTTPException(404, "Clave no encontrada")
+        await app.state.db.audit(p.org_id, p.user_id, "apikey.revoked", {"key_id": key_id})
+        return Response(status_code=204)
 
     @app.get("/api/v1/phone-numbers")
     async def list_phones(p: Principal = Depends(authed("phones:read"))):
