@@ -62,7 +62,10 @@ class Persistence(Protocol):
     async def rollback_agent(self, org_id: str, agent_id: str, version: int) -> dict[str, Any] | None: ...
     async def set_agent_status(self, org_id: str, agent_id: str, status: str) -> dict[str, Any] | None: ...
     async def list_phone_numbers(self, org_id: str) -> list[dict[str, Any]]: ...
-    async def add_phone_number(self, org_id: str, e164: str, agent_id: str | None) -> dict[str, Any]: ...
+    async def add_phone_number(self, org_id: str, e164: str, agent_id: str | None,
+                               transfer_number: str | None = None) -> dict[str, Any]: ...
+    async def update_phone_number(self, org_id: str, phone_id: str, changes: dict[str, Any]) -> dict[str, Any] | None: ...
+    async def get_call_by_sid(self, org_id: str, provider: str, sid: str) -> dict[str, Any] | None: ...
     async def delete_phone_number(self, org_id: str, phone_id: str) -> bool: ...
     async def resolve_phone_number(self, e164: str) -> dict[str, Any] | None: ...
     async def upsert_call(self, org_id: str, provider: str, sid: str, direction: str, agent_id: str | None,
@@ -196,14 +199,29 @@ class InMemoryPersistence:
         return dict(a)
 
     async def list_phone_numbers(self, org_id):
-        return [dict(n) for n in self.phones.values() if n["org_id"] == org_id]
+        return [self._public_phone(n) for n in self.phones.values() if n["org_id"] == org_id]
 
-    async def add_phone_number(self, org_id, e164, agent_id):
+    async def add_phone_number(self, org_id, e164, agent_id, transfer_number=None):
         if any(n["e164"] == e164 for n in self.phones.values()):
             raise PhoneNumberTaken(e164)
         pid = str(uuid.uuid4())
-        self.phones[pid] = {"id": pid, "org_id": org_id, "e164": e164, "agent_id": agent_id}
-        return dict(self.phones[pid])
+        self.phones[pid] = {"id": pid, "org_id": org_id, "e164": e164, "agent_id": agent_id, "transfer_number": transfer_number}
+        return self._public_phone(self.phones[pid])
+
+    @staticmethod
+    def _public_phone(n):
+        return {"id": n["id"], "e164": n["e164"], "agent_id": n["agent_id"], "transfer_number": n.get("transfer_number")}
+
+    async def update_phone_number(self, org_id, phone_id, changes):
+        n = self.phones.get(phone_id)
+        if not n or n["org_id"] != org_id:
+            return None
+        n.update(changes)
+        return self._public_phone(n)
+
+    async def get_call_by_sid(self, org_id, provider, sid):
+        c = next((c for c in self.calls.values() if c["org_id"] == org_id and c["provider"] == provider and c["sid"] == sid), None)
+        return self._public_call(c) if c else None
 
     async def upsert_call(self, org_id, provider, sid, direction, agent_id, our_number, peer_hash):
         existing = next((c for c in self.calls.values() if c["provider"] == provider and c["sid"] == sid), None)

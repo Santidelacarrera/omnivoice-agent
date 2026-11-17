@@ -141,3 +141,20 @@ def test_transfer_with_context_on_postgres_and_redis():
         assert "supervisor" not in str(detail)
         assert c.post(f"/api/v1/calls/{call['id']}/end", headers=_h(DEMO)).status_code == 409
         assert c.post(f"/api/v1/calls/{call['id']}/transfer", headers=_h(OTHER), json={}).status_code == 404
+
+
+def test_line_operator_and_call_lookup_on_postgres():
+    """Migración 009: operador por línea en PostgreSQL, con RLS, y búsqueda de la llamada por su id de proveedor."""
+    tw = FakeTwilio()
+    num = "+5697" + str(uuid.uuid4().int)[:7]
+    op = "+5693" + str(uuid.uuid4().int)[:7]
+    with TestClient(create_app(_settings(), twilio=tw)) as c:
+        p = c.post("/api/v1/phone-numbers", headers=_h(DEMO), json={"e164": num}).json()
+        assert p["transfer_number"] is None
+        up = c.patch(f"/api/v1/phone-numbers/{p['id']}", headers=_h(DEMO), json={"transfer_number": op})
+        assert up.status_code == 200 and up.json()["transfer_number"] == op
+        assert c.patch(f"/api/v1/phone-numbers/{p['id']}", headers=_h(OTHER), json={"transfer_number": op}).status_code == 404
+        listed = [n for n in c.get("/api/v1/phone-numbers", headers=_h(DEMO)).json()["items"] if n["id"] == p["id"]]
+        assert listed and listed[0]["transfer_number"] == op
+        assert c.patch(f"/api/v1/phone-numbers/{p['id']}", headers=_h(DEMO), json={"transfer_number": "1234"}).status_code == 422
+        c.delete(f"/api/v1/phone-numbers/{p['id']}", headers=_h(DEMO))

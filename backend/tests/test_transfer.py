@@ -179,3 +179,59 @@ def test_api_end_connected_call_completes_it():
     assert c.get(f"/api/v1/calls/{cid}", headers=h()).json()["status"] == cs.COMPLETED
     ws.send_text(json.dumps({"event": "stop"}))
     cm.__exit__(None, None, None)
+
+
+# ---------- operador por línea ----------
+def line_with_operator(c, operator=None):
+    aid = c.post("/api/v1/agents", json=BODY, headers=h()).json()["id"]
+    c.post(f"/api/v1/agents/{aid}/publish", headers=h())
+    b = {"e164": NUM, "agent_id": aid}
+    if operator:
+        b["transfer_number"] = operator
+    r = c.post("/api/v1/phone-numbers", json=b, headers=h())
+    assert r.status_code == 201 and r.json()["transfer_number"] == operator
+    return r.json()["id"]
+
+
+def transfer_via_api(c, tw):
+    cm, ws, cid = connected_call(c)
+    assert c.post(f"/api/v1/calls/{cid}/transfer", json={}, headers=h()).status_code == 202 and wait(lambda: tw.redirects)
+    ws.send_text(json.dumps({"event": "stop"}))
+    cm.__exit__(None, None, None)
+    return tw.redirects[0][1]
+
+
+def test_line_operator_overrides_the_global_one():
+    c, tw = live(FakeProvider(respond_on_audio=True, script=[{"type": "transcript_agent", "text": "hola"}]))
+    line_with_operator(c, "+56933330000")
+    twiml = transfer_via_api(c, tw)
+    assert "+56933330000" in twiml and "+34911111111" not in twiml
+
+
+def test_line_without_operator_uses_the_global_one():
+    c, tw = live(FakeProvider(respond_on_audio=True, script=[{"type": "transcript_agent", "text": "hola"}]))
+    line_with_operator(c)
+    assert "+34911111111" in transfer_via_api(c, tw)
+
+
+def test_line_operator_alone_makes_transfer_available_without_global_number():
+    c, tw = live(FakeProvider(respond_on_audio=True, script=[{"type": "transcript_agent", "text": "hola"}]), human_transfer_number="")
+    line_with_operator(c, "+56933330000")
+    assert "+56933330000" in transfer_via_api(c, tw)
+
+
+def test_patch_phone_operator_and_agent_with_validation_and_isolation():
+    c, _ = live()
+    pid = line_with_operator(c)
+    other = str(uuid.uuid4())
+    assert c.patch(f"/api/v1/phone-numbers/{pid}", json={"transfer_number": "+56933330000"}, headers=h(ORG, "operator")).status_code == 403
+    assert c.patch(f"/api/v1/phone-numbers/{pid}", json={}, headers=h()).status_code == 422
+    assert c.patch(f"/api/v1/phone-numbers/{pid}", json={"transfer_number": "no-es-e164"}, headers=h()).status_code == 422
+    assert c.patch(f"/api/v1/phone-numbers/{pid}", json={"transfer_number": "+56933330000"}, headers=h(other)).status_code == 404
+    assert c.patch(f"/api/v1/phone-numbers/{pid}", json={"agent_id": str(uuid.uuid4())}, headers=h()).status_code == 404
+    ok = c.patch(f"/api/v1/phone-numbers/{pid}", json={"transfer_number": "+56933330000"}, headers=h())
+    assert ok.status_code == 200 and ok.json()["transfer_number"] == "+56933330000" and ok.json()["agent_id"]
+    cleared = c.patch(f"/api/v1/phone-numbers/{pid}", json={"transfer_number": None, "agent_id": None}, headers=h()).json()
+    assert cleared["transfer_number"] is None and cleared["agent_id"] is None
+    assert c.get("/api/v1/phone-numbers", headers=h(ORG, "analyst")).json()["items"][0]["transfer_number"] is None
+    assert "phone.updated" in [e["action"] for e in c.get("/api/v1/audit-logs", headers=h()).json()["items"]]

@@ -225,21 +225,40 @@ class PostgresPersistence:
 
     async def list_phone_numbers(self, org_id):
         async with org_transaction(org_id) as c:
-            rows = (await c.execute(text("SELECT id, e164, agent_id FROM phone_numbers WHERE org_id = :o ORDER BY created_at"),
+            rows = (await c.execute(text("SELECT id, e164, agent_id, transfer_number FROM phone_numbers WHERE org_id = :o ORDER BY created_at"),
                                     {"o": org_id})).all()
-        return [{"id": str(r[0]), "e164": r[1], "agent_id": str(r[2]) if r[2] else None} for r in rows]
+        return [{"id": str(r[0]), "e164": r[1], "agent_id": str(r[2]) if r[2] else None, "transfer_number": r[3]} for r in rows]
 
-    async def add_phone_number(self, org_id, e164, agent_id):
+    async def add_phone_number(self, org_id, e164, agent_id, transfer_number=None):
         pid = str(uuid.uuid4())
         try:
             async with org_transaction(org_id) as c:
-                await c.execute(text("INSERT INTO phone_numbers (id, org_id, e164, agent_id) VALUES (:i, :o, :e, :a)"),
-                                {"i": pid, "o": org_id, "e": e164, "a": agent_id})
+                await c.execute(text("INSERT INTO phone_numbers (id, org_id, e164, agent_id, transfer_number) VALUES (:i, :o, :e, :a, :t)"),
+                                {"i": pid, "o": org_id, "e": e164, "a": agent_id, "t": transfer_number})
         except IntegrityError as exc:
             raise PhoneNumberTaken(e164) from exc
-        return {"id": pid, "e164": e164, "agent_id": agent_id}
+        return {"id": pid, "e164": e164, "agent_id": agent_id, "transfer_number": transfer_number}
 
-    @_safe
+    async def update_phone_number(self, org_id, phone_id, changes):
+        sets = {"agent_id": "agent_id = :agent_id", "transfer_number": "transfer_number = :transfer_number"}
+        cols = [sets[k] for k in changes if k in sets]
+        if not cols:
+            return None
+        async with org_transaction(org_id) as c:
+            n = (await c.execute(text("UPDATE phone_numbers SET " + ", ".join(cols) + " WHERE id = :i AND org_id = :o"),  # noqa: S608 - columnas de una lista cerrada
+                                 {**{k: v for k, v in changes.items() if k in sets}, "i": phone_id, "o": org_id})).rowcount
+            if not n:
+                return None
+            r = (await c.execute(text("SELECT id, e164, agent_id, transfer_number FROM phone_numbers WHERE id = :i AND org_id = :o"),
+                                 {"i": phone_id, "o": org_id})).first()
+        return {"id": str(r[0]), "e164": r[1], "agent_id": str(r[2]) if r[2] else None, "transfer_number": r[3]}
+
+    async def get_call_by_sid(self, org_id, provider, sid):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT * FROM calls WHERE org_id = :o AND provider = :p AND provider_call_sid = :s"),
+                                 {"o": org_id, "p": provider, "s": sid})).mappings().first()
+        return self._call_row(r) if r else None
+
     async def upsert_call(self, org_id, provider, sid, direction, agent_id, our_number, peer_hash):
         async with org_transaction(org_id) as c:
             row = (await c.execute(

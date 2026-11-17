@@ -68,6 +68,13 @@ class PhoneNumberBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     e164: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$")
     agent_id: str | None = None
+    transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
+
+
+class UpdatePhoneBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    agent_id: str | None = None  # null = quitar el agente
+    transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # null = usar el operador global
 
 
 class CreateAgentBody(BaseModel):
@@ -407,10 +414,23 @@ def create_app(
         if body.agent_id is not None:
             await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
         try:
-            phone = await app.state.db.add_phone_number(p.org_id, body.e164, body.agent_id)
+            phone = await app.state.db.add_phone_number(p.org_id, body.e164, body.agent_id, body.transfer_number)
         except PhoneNumberTaken:
             raise HTTPException(409, "Ese número ya está registrado") from None
         await app.state.db.audit(p.org_id, p.user_id, "phone.added", {"phone_id": phone["id"], "agent_id": body.agent_id})
+        return phone
+
+    @app.patch("/api/v1/phone-numbers/{phone_id}")
+    async def update_phone(phone_id: str, body: UpdatePhoneBody, p: Principal = Depends(authed("phones:write"))):
+        changes = body.model_dump(exclude_unset=True)
+        if not changes:
+            raise HTTPException(422, "Sin cambios")
+        if changes.get("agent_id"):
+            await _agent_or_404(p.org_id, changes["agent_id"])
+        phone = await app.state.db.update_phone_number(p.org_id, _valid_id(phone_id), changes)
+        if not phone:
+            raise HTTPException(404, "Número no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "phone.updated", {"phone_id": phone_id, "fields": sorted(changes)})
         return phone
 
     @app.delete("/api/v1/phone-numbers/{phone_id}", status_code=204)

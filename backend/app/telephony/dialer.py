@@ -15,6 +15,7 @@ from app.observability.metrics import ERRORS, OUTBOUND_JOBS
 from app.services.persistence import OutboundRejected
 from app.telephony import call_state as cs
 from app.telephony import outbound as ob
+from app.telephony.provider import TelephonyProvider
 
 log = structlog.get_logger()
 MAX_SCHEDULE_AHEAD = timedelta(days=30)
@@ -48,7 +49,7 @@ def public_job(j: dict[str, Any]) -> dict[str, Any]:
 
 
 class Dialer:
-    def __init__(self, s: Settings, db_getter, store_getter, client, voice_url: str, status_url: str, track) -> None:
+    def __init__(self, s: Settings, db_getter, store_getter, client: TelephonyProvider, voice_url: str, status_url: str, track) -> None:
         self.s, self._db, self._store, self.client = s, db_getter, store_getter, client
         self.voice_url, self.status_url, self.track = voice_url, status_url, track
         self.policy = policy_from_settings(s)

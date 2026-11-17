@@ -105,3 +105,7 @@ Cada llamada es una fila en `calls` (única por proveedor + `CallSid`) con su hi
 - **Privacidad:** el número completo se guarda únicamente mientras el trabajo está activo; al terminar se borra y queda una huella con sal por organización. La API nunca devuelve el número completo (`to_masked`).
 - **Número de origen:** el de la organización (el primero con un agente publicado, o `from_number`). El agente que atiende al contestar es el de ese número.
 - **Planificador:** cada `OUTBOUND_POLL_SECONDS` toma los trabajos vencidos de forma atómica (varias réplicas no se pisan; uno abandonado "marcando" se recupera tras `OUTBOUND_STALE_CLAIM_SECONDS`). Métrica `omnivoice_outbound_jobs_total{event}`. Para que los reintentos se cierren hay que configurar el *Status Callback* (ver «Estados de llamada»); las salientes lo reciben automáticamente.
+
+## Operador por línea y proveedor
+- Cada número puede tener su operador: `PATCH /api/v1/phone-numbers/{id}` con `{"transfer_number": "+56..."}` (`null` = usar `HUMAN_TRANSFER_NUMBER`). La transferencia usa el de la línea por la que entró o salió la llamada. **Quien tenga `phones:write` decide a qué número se desvían llamadas**: restringe ese permiso, porque un destino de tarificación especial sería un fraude de coste.
+- `TelephonyProvider` (`app/telephony/provider.py`) es el contrato de las órdenes al proveedor. Solo cubre el plano de control; la entrada (webhooks, TwiML, firma) sigue siendo de Twilio.

@@ -23,6 +23,7 @@ from app.telephony import outbound as ob
 from app.telephony.codec import platform_to_telephony, telephony_to_platform
 from app.telephony.dialer import Dialer, OutboundError, public_job
 from app.telephony.handoff import HANDOFF_TTL_S, build_briefing
+from app.telephony.provider import TelephonyProvider
 from app.telephony.twilio import TwilioClient, dial_twiml, hangup_twiml, stream_twiml, validate_signature
 
 log = structlog.get_logger()
@@ -81,10 +82,10 @@ class MediaStreamSender:
 
 def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession], make_provider: Callable[[], Any],
                        registry: Any, authed: Callable[[str], Any], storage: Any = None,
-                       twilio: TwilioClient | None = None) -> None:
+                       twilio: TelephonyProvider | None = None) -> None:
     if s.telephony_provider != "twilio" and twilio is None:
         return
-    client = twilio or TwilioClient(s.twilio_account_sid, s.twilio_auth_token)
+    client: TelephonyProvider = twilio or TwilioClient(s.twilio_account_sid, s.twilio_auth_token)
     app.state.twilio = client
     background: set[asyncio.Task] = set()
     by_call: dict[tuple[str, str], VoiceSession] = {}  # (org, CallSid) → sesión viva, para dar contexto al traspaso
@@ -410,9 +411,19 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
         sess = by_call.get((org_id, call_sid))
         return sess.recent_context() if sess else []
 
+    async def operator_number(org_id: str, call_sid: str) -> str:
+        """Operador de la línea por la que entró/salió la llamada; si no tiene, el global (HUMAN_TRANSFER_NUMBER)."""
+        call = await app.state.db.get_call_by_sid(org_id, "twilio", call_sid) if call_sid else None
+        if call and call.get("our_number"):
+            for n in await app.state.db.list_phone_numbers(org_id):
+                if n["e164"] == call["our_number"] and n.get("transfer_number"):
+                    return n["transfer_number"]
+        return s.human_transfer_number
+
     async def _transfer(call_sid: str, org_id: str, reason: str = "", turns: list[tuple[str, str]] | None = None,
                         source: str = "agent") -> dict[str, Any]:
-        if not s.human_transfer_number or not call_sid:
+        target = await operator_number(org_id, call_sid)
+        if not target or not call_sid:
             return {"status": "unavailable"}
         whisper_url = None
         briefing = build_briefing(reason, turns or [], source)
@@ -428,7 +439,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
         async def later() -> None:
             await asyncio.sleep(s.transfer_announce_ms / 1000)  # deja que el agente termine de avisar
             try:
-                await client.redirect_call(call_sid, dial_twiml(s.human_transfer_number, s.twilio_from_number or None, whisper_url))
+                await client.redirect_call(call_sid, dial_twiml(target, s.twilio_from_number or None, whisper_url))
             except Exception:  # noqa: BLE001
                 log.exception("transfer_redirect_failed", call_sid=call_sid)
                 ERRORS.labels("telephony_transfer").inc()
