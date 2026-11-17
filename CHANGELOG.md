@@ -5,6 +5,7 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). A
 ## [Sin publicar]
 
 ### Añadido
+- **SDK de JavaScript** (`sdk/js`): agentes, llamadas, salientes, webhooks, equipo, plan y `verifyWebhook`; pruebas en CI.
 - **Conocimiento (migración 016):** documentos PDF/DOCX/TXT/CSV con extracción segura (tipo por firma, límites anti zip-bomb, XML sin DTD), fragmentos con fuente, versiones, cuotas y búsqueda en español; página «Conocimiento» y herramienta `search_knowledge_base` (el contenido es dato, nunca instrucciones).
 - **Planes y cuotas (migración 017):** planes definidos en código sin precios, cuotas opt-in (`PLANS_ENFORCED`), consumo mensual, bloqueo, webhook `usage.alert` al 80 y 100 %, `GET /api/v1/plan`, CLI `set-plan`; margen solo si se configura un precio.
 - **Equipo (migración 018):** `GET/PUT/DELETE /api/v1/team`; reglas dentro de la base de datos (solo un owner toca owners, nunca sin owner); página «Equipo». La autenticación sigue siendo externa.

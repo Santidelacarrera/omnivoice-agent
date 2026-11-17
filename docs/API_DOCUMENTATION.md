@@ -21,7 +21,7 @@ Reglas: no se puede crear una clave con más permisos que los propios, nunca `ow
 Detalle de reglas (consentimiento, horarios, confirmación de acciones, privacidad) en `docs/RUNBOOK.md` y `docs/AI_ORCHESTRATION.md`. La especificación OpenAPI completa está en `/docs` fuera de producción.
 
 ## SDK
-Python en `sdk/python` (un archivo, depende solo de `httpx`; ver su README). Pendiente: SDK de JavaScript y publicación en PyPI y npm.
+Python en `sdk/python` (un archivo, depende solo de `httpx`; ver su README). JavaScript en `sdk/js` (un archivo, sin dependencias, con tipos; `verifyWebhook` comprobado contra el firmador real). Pendiente: publicación en PyPI y npm.
 
 ## Pendiente respecto al documento maestro
 Alertas de consumo por webhook (necesitan cuotas por plan).
