@@ -26,6 +26,14 @@ ACTIVE_JOB_STATES = ("SCHEDULED", "DIALING")
 MISSED_STATES = ("BUSY", "NO_ANSWER", "FAILED")  # sin atender: ocupado, no contestó o falló antes de conectar
 
 
+class TeamError(Exception):
+    """Regla de equipo incumplida: invalid_role | invalid_email | forbidden | owner_only | last_owner | org_not_found."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 class ApiKeyPrefixTaken(Exception):
     """Colisión del prefijo aleatorio (muy improbable): se genera otra clave."""
 
@@ -60,6 +68,11 @@ class Persistence(Protocol):
     async def usage_summary(self, org_id: str) -> dict[str, Any]: ...
     async def call_analytics(self, org_id: str, since: datetime) -> dict[str, Any]: ...
     async def usage_since(self, org_id: str, since: datetime) -> dict[str, Any]: ...
+    async def org_plan(self, org_id: str) -> str | None: ...
+    async def team_list(self, org_id: str) -> list[dict[str, Any]]: ...
+    async def team_set(self, org_id: str, email: str, role: str, actor_role: str) -> dict[str, Any]: ...
+    async def team_remove(self, org_id: str, email: str, actor_role: str) -> bool: ...
+    async def count_outbound_jobs_since(self, org_id: str, since: datetime) -> int: ...
     async def list_agents(self, org_id: str) -> list[dict[str, Any]]: ...
     async def get_agent(self, org_id: str, agent_id: str) -> dict[str, Any] | None: ...
     async def create_agent(self, org_id: str, name: str, instructions: str, tools: list[str],
@@ -134,6 +147,8 @@ class InMemoryPersistence:
         self.call_events: list[dict[str, Any]] = []
         self.jobs: dict[str, dict[str, Any]] = {}
         self.api_keys: dict[str, dict[str, Any]] = {}
+        self.org_plans: dict[str, str] = {}
+        self.team: dict[str, dict[str, dict[str, str]]] = {}  # org -> email -> {user_id, role}
         self.webhooks: dict[str, dict[str, Any]] = {}
         self.webhook_deliveries: list[dict[str, Any]] = []
         self.dnc: dict[str, dict[str, Any]] = {}
@@ -186,6 +201,50 @@ class InMemoryPersistence:
     async def usage_summary(self, org_id):
         secs = sum(c.get("audio_seconds", 0) for c in self.convs.values() if c["org_id"] == org_id)
         return {"audio_seconds": secs, "estimated_cost_usd": round(secs / 60 * COST_PER_AUDIO_MINUTE_USD, 4)}
+
+    async def team_list(self, org_id):
+        return [{"user_id": v["user_id"], "email": e, "role": v["role"]} for e, v in sorted(self.team.get(org_id, {}).items())]
+
+    async def team_set(self, org_id, email, role, actor_role):
+        import re
+
+        if role not in ("owner", "admin", "manager", "operator", "analyst", "viewer"):
+            raise TeamError("invalid_role")
+        if actor_role not in ("owner", "admin"):
+            raise TeamError("forbidden")
+        if not re.fullmatch(r"[^@\s]{1,64}@[^@\s]{1,255}\.[^@\s]{2,}", email):
+            raise TeamError("invalid_email")
+        members = self.team.setdefault(org_id, {})
+        email = email.lower()
+        prev = members.get(email, {}).get("role")
+        if (role == "owner" or prev == "owner") and actor_role != "owner":
+            raise TeamError("owner_only")
+        if prev == "owner" and role != "owner" and sum(m["role"] == "owner" for m in members.values()) <= 1:
+            raise TeamError("last_owner")
+        uid = members.get(email, {}).get("user_id") or str(uuid.uuid4())
+        members[email] = {"user_id": uid, "role": role}
+        return {"user_id": uid, "role": role, "previous": prev}
+
+    async def team_remove(self, org_id, email, actor_role):
+        if actor_role not in ("owner", "admin"):
+            raise TeamError("forbidden")
+        members = self.team.get(org_id, {})
+        m = members.get(email.lower())
+        if not m:
+            return False
+        if m["role"] == "owner":
+            if actor_role != "owner":
+                raise TeamError("owner_only")
+            if sum(x["role"] == "owner" for x in members.values()) <= 1:
+                raise TeamError("last_owner")
+        del members[email.lower()]
+        return True
+
+    async def org_plan(self, org_id):
+        return self.org_plans.get(org_id)
+
+    async def count_outbound_jobs_since(self, org_id, since):
+        return sum(1 for j in self.jobs.values() if j["org_id"] == org_id and j["created_at"] >= since.timestamp())
 
     async def usage_since(self, org_id, since):
         return await self.usage_summary(org_id)  # en memoria no se guarda la fecha del consumo

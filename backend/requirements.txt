@@ -14,3 +14,5 @@ boto3>=1.34,<2
 httpx==0.28.1
 tzdata
 cryptography>=50,<51
+defusedxml>=0.7.1,<0.8
+pypdf>=7,<8

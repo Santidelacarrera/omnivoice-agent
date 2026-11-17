@@ -145,7 +145,12 @@ export default function NewAgentWizard() {
           <details className="text-xs text-slate-500"><summary>Instrucciones resultantes ({instructions.length}/4000)</summary><pre className="mt-2 whitespace-pre-wrap rounded bg-slate-50 p-2">{instructions || "—"}</pre></details>
           <p className="text-xs text-slate-500">Además de esto, la plataforma aplica sus propias reglas (no inventar datos, confirmar antes de cambiar algo, derivar a una persona) que tus instrucciones no pueden desactivar.</p>
         </>)}
-        {step === 3 && <p className="text-sm text-slate-600">La base de conocimiento con documentos (PDF, DOCX, CSV) <b>aún no está disponible</b>. Hoy el agente puede buscar en la tabla de conocimiento de la organización con la herramienta «Buscar en la base de conocimiento».</p>}
+        {step === 3 && (
+          <div className="space-y-2 text-sm text-slate-600">
+            <p>Los documentos de tu empresa (PDF, DOCX, TXT, CSV) se gestionan en <Link className="underline" href="/knowledge">Conocimiento</Link> y son compartidos por todos tus agentes.</p>
+            <p>Para que este agente los consulte, activa la herramienta <b>search_knowledge_base</b> en el paso 5. Responderá citando la fuente, y si no encuentra la respuesta lo dirá en vez de inventarla.</p>
+          </div>
+        )}
         {step === 4 && (
           <fieldset><legend className="text-sm">Herramientas permitidas (mínimo privilegio: da solo las necesarias)</legend>
             <div className="mt-2 grid gap-2 md:grid-cols-2">

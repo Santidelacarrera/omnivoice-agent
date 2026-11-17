@@ -33,7 +33,7 @@ test("asistente de 9 pasos: valida cada paso, crea el borrador y publica", async
   await page.getByRole("button", { name: "Siguiente" }).click();
 
   // pasos 4 (aviso honesto) y 5 (herramientas)
-  await expect(page.getByText(/aún no está disponible/)).toBeVisible();
+  await expect(page.getByText(/search_knowledge_base/).first()).toBeVisible();
   await page.getByRole("button", { name: "Siguiente" }).click();
   await expect(page.getByLabel("check_inventory")).toBeVisible();
   await page.getByLabel("check_inventory").check();
@@ -150,4 +150,34 @@ test("panel y llamadas: cargan con datos reales y sin errores de consola", async
   await page.goto("/calls");
   await expect(page.getByText("Sin llamadas todavía.")).toBeVisible();
   expect(errors).toEqual([]);
+});
+
+test("conocimiento: sube un documento, lo encuentra con cita, lo reemplaza y lo elimina", async ({ page }) => {
+  await page.goto("/knowledge");
+  await page.getByLabel("Archivo").setInputFiles({
+    name: "faq-e2e.txt", mimeType: "text/plain",
+    buffer: Buffer.from("El horario de atención es de lunes a sábado de 9 a 20. Las devoluciones se aceptan durante 30 días con el ticket."),
+  });
+  await expect(page.getByRole("status")).toContainText("Documento añadido");
+  await expect(page.getByText("faq-e2e.txt")).toBeVisible();
+
+  await page.getByLabel("Pregunta").fill("¿Cuál es el horario de atención?");
+  await page.getByRole("button", { name: "Buscar" }).click();
+  await expect(page.locator("li", { hasText: "faq-e2e.txt" }).filter({ hasText: "lunes a sábado" })).toBeVisible();
+
+  await page.getByLabel("Pregunta").fill("astronautas marcianos");
+  await page.getByRole("button", { name: "Buscar" }).click();
+  await expect(page.getByText(/Sin resultados/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Reemplazar" }).click();
+  await page.getByLabel("Archivo").setInputFiles({ name: "faq-e2e.txt", mimeType: "text/plain", buffer: Buffer.from("Ahora atendemos también los domingos de 10 a 14 horas.") });
+  await expect(page.getByRole("status")).toContainText("versión 2");
+
+  // un archivo que no es lo que dice ser se rechaza con un mensaje claro
+  await page.getByLabel("Archivo").setInputFiles({ name: "malo.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 este archivo esta roto") });
+  await expect(page.getByRole("status")).toContainText("No se pudo leer el PDF");
+
+  page.once("dialog", (d) => d.accept());
+  await page.getByRole("button", { name: "Eliminar" }).first().click();
+  await expect(page.getByText("Aún no hay documentos.")).toBeVisible();
 });

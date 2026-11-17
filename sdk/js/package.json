@@ -1,0 +1,11 @@
+{
+  "name": "omnivoice-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "omnivoice-sdk.mjs",
+  "types": "omnivoice-sdk.d.ts",
+  "engines": { "node": ">=18" },
+  "scripts": { "test": "node --test" },
+  "license": "UNLICENSED",
+  "private": true
+}

@@ -33,3 +33,8 @@ MFA y recuperación de cuentas; rotación automática de secretos (el secreto de
 
 ## Reportar una vulnerabilidad
 Abre un aviso de seguridad privado en el repositorio de GitHub (pestaña *Security*) en lugar de un issue público.
+
+## Conocimiento, planes y equipo
+- Documentos: tipo por firma (no por extensión), límite de 5 MB y de 25 MB descomprimidos, 200 páginas PDF, `defusedxml` con DTD prohibida; el contenido recuperado se trata como dato, no como instrucciones (regla 7 de la política).
+- Plan: la aplicación no puede modificarlo (solo `SELECT (plan)`); no hay autoservicio de cambio de plan.
+- Equipo: la aplicación no lee `users`/`memberships`; solo funciones acotadas a una organización. Las claves de API no gestionan personas. Riesgo conocido: sin MFA ni invitaciones con verificación de email (identidad externa).

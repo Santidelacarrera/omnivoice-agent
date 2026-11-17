@@ -71,3 +71,8 @@ groups:
         for: 0m
         labels: { severity: warning }
         annotations: { summary: "Se bloqueó una transferencia por destino no permitido: revisar números de operador y TRANSFER_ALLOWED_PREFIXES" }
+      - alert: OperacionesBloqueadasPorPlan
+        expr: sum(increase(omnivoice_plan_blocked_total[1h])) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Una organización llegó al límite de su plan y se le rechazó una operación: avisa a comercial", runbook: "docs/RUNBOOK.md" }

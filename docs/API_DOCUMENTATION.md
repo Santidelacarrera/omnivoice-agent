@@ -21,7 +21,7 @@ Reglas: no se puede crear una clave con más permisos que los propios, nunca `ow
 Detalle de reglas (consentimiento, horarios, confirmación de acciones, privacidad) en `docs/RUNBOOK.md` y `docs/AI_ORCHESTRATION.md`. La especificación OpenAPI completa está en `/docs` fuera de producción.
 
 ## SDK
-Python en `sdk/python` (un archivo, depende solo de `httpx`; ver su README). Pendiente: SDK de JavaScript y publicación en PyPI y npm.
+Python en `sdk/python` (un archivo, depende solo de `httpx`; ver su README). JavaScript en `sdk/js` (un archivo, sin dependencias, con tipos; `verifyWebhook` comprobado contra el firmador real). Pendiente: publicación en PyPI y npm.
 
 ## Pendiente respecto al documento maestro
 Alertas de consumo por webhook (necesitan cuotas por plan).
@@ -45,3 +45,8 @@ def verify(secret, header, body, tolerance=300):
     return ok and abs(time.time() - int(p["t"])) <= tolerance
 ```
 Usa el cuerpo **crudo** tal como llega. **Seguridad:** la URL debe ser https, sin credenciales, y resolver solo a direcciones públicas; no se siguen redirecciones. Variables: `WEBHOOK_SECRET_KEY` (cifrado de secretos; si falta se deriva de `JWT_SECRET`, y rotar esa clave dejaría ilegibles los secretos guardados: define una propia en producción), `WEBHOOKS_ALLOW_PRIVATE` (**solo desarrollo**: desactiva la defensa SSRF).
+
+## Conocimiento, plan y equipo
+- `POST/PUT/GET/DELETE /api/v1/knowledge/sources` y `GET /api/v1/knowledge/search?q=` (permisos `knowledge:read/write`): documentos en base64 (máx. 5 MB); PDF, DOCX, TXT y CSV; el tipo se detecta por firma. La búsqueda usa texto completo en español (no semántica: «devolver» no enlaza con «devoluciones»).
+- `GET /api/v1/plan`: plan, límites, consumo y porcentaje. Con `PLANS_ENFORCED=true` las operaciones que superan el límite devuelven 409 (cuotas) o 429 (minutos del mes). Webhook `usage.alert` al 80 y 100 %.
+- `GET /api/v1/team`, `PUT /api/v1/team/{email}` (`{"role": ...}`), `DELETE /api/v1/team/{email}`: requieren `team:read`/`team:write` (owner y admin); no las usan claves de API. 403 `owner_only`, 409 si se quedaría sin owner. Esta lista no autentica: el proveedor de identidad debe consultarla al emitir el JWT.

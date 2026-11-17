@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from app.database.engine import get_engine, org_transaction
 from app.observability.metrics import ERRORS
@@ -17,6 +17,7 @@ from app.services.persistence import (
     ApiKeyPrefixTaken,
     OutboundRejected,
     PhoneNumberTaken,
+    TeamError,
 )
 from app.telephony.call_state import can_transition, is_terminal
 
@@ -692,6 +693,45 @@ class PostgresPersistence:
                 text("SELECT COALESCE(sum(audio_seconds),0) s, COALESCE(sum(estimated_cost_usd),0) c "
                      "FROM usage_records WHERE org_id = :o"), {"o": org_id})).first()
         return {"audio_seconds": float(r.s), "estimated_cost_usd": float(r.c)}
+
+    # ---- equipo (funciones SECURITY DEFINER de la migración 018: las reglas viven en la base de datos) ----
+    @staticmethod
+    def _team_error(exc: Exception) -> TeamError:
+        msg = str(exc)
+        for code in ("invalid_role", "invalid_email", "forbidden", "owner_only", "last_owner", "org_not_found"):
+            if code in msg:
+                return TeamError(code)
+        raise exc
+
+    async def team_list(self, org_id):
+        async with get_engine().connect() as c:
+            rows = (await c.execute(text("SELECT user_id, email, role FROM team_list(:o)"), {"o": org_id})).all()
+        return [{"user_id": str(r[0]), "email": r[1], "role": r[2]} for r in rows]
+
+    async def team_set(self, org_id, email, role, actor_role):
+        try:
+            async with get_engine().begin() as c:
+                r = (await c.execute(text("SELECT user_id, role, previous FROM team_set_member(:o, :e, :r, :a)"),
+                                     {"o": org_id, "e": email, "r": role, "a": actor_role})).first()
+        except DBAPIError as exc:
+            raise self._team_error(exc) from None
+        return {"user_id": str(r[0]), "role": r[1], "previous": r[2]}
+
+    async def team_remove(self, org_id, email, actor_role):
+        try:
+            async with get_engine().begin() as c:
+                return bool((await c.execute(text("SELECT team_remove_member(:o, :e, :a)"), {"o": org_id, "e": email, "a": actor_role})).scalar())
+        except DBAPIError as exc:
+            raise self._team_error(exc) from None
+
+    async def org_plan(self, org_id):
+        async with org_transaction(org_id) as c:
+            return (await c.execute(text("SELECT plan FROM organizations WHERE id = :o"), {"o": org_id})).scalar()
+
+    async def count_outbound_jobs_since(self, org_id, since):
+        async with org_transaction(org_id) as c:
+            return int((await c.execute(text("SELECT count(*) FROM outbound_jobs WHERE org_id = :o AND created_at >= :s"),
+                                        {"o": org_id, "s": since})).scalar() or 0)
 
     async def usage_since(self, org_id, since):
         async with org_transaction(org_id) as c:

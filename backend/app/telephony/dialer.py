@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 
+from app.billing.plans import QuotaExceeded
 from app.core.config import Settings
 from app.observability.metrics import CALLS_ABANDONED, ERRORS, OUTBOUND_JOBS
 from app.services.persistence import OutboundRejected
@@ -54,6 +55,7 @@ class Dialer:
         self.s, self._db, self._store, self.client = s, db_getter, store_getter, client
         self.voice_url, self.status_url, self.track = voice_url, status_url, track
         self.policy = policy_from_settings(s)
+        self.plans = None  # lo asigna el arranque (app.state.plans); None = sin cuotas
         self._task: asyncio.Task | None = None
 
     @property
@@ -102,6 +104,11 @@ class Dialer:
             raise OutboundError(422, "No se puede programar con más de 30 días de antelación")
         when = max(when, now)
         when = ob.next_window_start(when, self.policy, tz)  # fuera de horario: pasa al próximo inicio de ventana
+        if self.plans is not None:
+            try:
+                await self.plans.ensure_room(org_id, "max_outbound_per_day")
+            except QuotaExceeded as exc:
+                raise OutboundError(429, exc.message) from None
         frm = await self.pick_from_number(org_id, from_number)
         try:
             res = await self.db.create_outbound_job(

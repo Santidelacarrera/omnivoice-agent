@@ -2,6 +2,7 @@
   python -m app.cli create-org --name "Clínica Sur" --owner-email dueno@clinica.cl
   python -m app.cli set-member --org <uuid> --email persona@clinica.cl --role manager
   python -m app.cli list-members --org <uuid>
+  python -m app.cli set-plan --org <uuid> --plan business
 Los tres últimos requieren ADMIN_DATABASE_URL (rol de migraciones, NO el de la app): ver app/services/provisioning.py.
 
 Sirve para emitir tokens mientras no hay un proveedor de identidad externo (p. ej. un administrador o un servicio
@@ -34,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--org", required=True)
     m.add_argument("--email", required=True)
     m.add_argument("--role", required=True, choices=sorted(ROLE_PERMISSIONS))
+    sp = sub.add_parser("set-plan", help="Asigna el plan de una organización")
+    sp.add_argument("--org", required=True)
+    sp.add_argument("--plan", required=True, choices=["starter", "business", "professional", "enterprise"])
     lm = sub.add_parser("list-members", help="Lista los miembros de una organización")
     lm.add_argument("--org", required=True)
     a = p.parse_args(argv)
@@ -67,6 +71,8 @@ def _provision(a) -> int:
         try:
             if a.cmd == "create-org":
                 return await pv.create_organization(engine, a.name, a.owner_email, a.retention_days)
+            if a.cmd == "set-plan":
+                return await pv.set_plan(engine, a.org, a.plan)
             if a.cmd == "set-member":
                 return await pv.set_member(engine, a.org, a.email, a.role)
             return await pv.list_members(engine, a.org)

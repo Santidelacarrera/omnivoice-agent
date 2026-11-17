@@ -71,6 +71,19 @@ class PhoneNumberBody(BaseModel):
     transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
 
 
+class TeamRoleBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str = Field(pattern=r"^(owner|admin|manager|operator|analyst|viewer)$")
+
+
+class KnowledgeSourceBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=200)
+    kind: str | None = Field(default=None, pattern=r"^(txt|csv|docx|pdf)$", description="Solo para distinguir CSV de TXT; el tipo real se decide por el contenido")
+    content_base64: str | None = Field(default=None, max_length=7_200_000)
+    text: str | None = Field(default=None, max_length=1_500_000, description="Alternativa a content_base64: texto plano")
+
+
 class OrderBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     phone: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$", description="Número del cliente; solo se guarda su huella")
@@ -208,7 +221,10 @@ def create_app(
 
     setup_sentry(s)
     setup_tracing(app, s)
+    from app.billing.plans import Plans, QuotaExceeded
+
     app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
+    app.state.plans = Plans(s, lambda: app.state.db, lambda: app.state.store, lambda: app.state.repo, lambda: app.state.webhooks)
     registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
 
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
@@ -312,6 +328,10 @@ def create_app(
         if await budget_remaining_s(p.org_id) <= 0:
             BUDGET_REJECTED.labels("org_daily_budget").inc()
             raise HTTPException(429, "Presupuesto diario de conversación de la organización agotado")
+        try:
+            await app.state.plans.ensure_minutes(p.org_id)
+        except QuotaExceeded as exc:
+            raise HTTPException(429, exc.message) from None
         voice = body.voice if body else None
         language = body.language if body else None
         if voice and voice not in s.available_voices:
@@ -401,9 +421,21 @@ def create_app(
     async def list_agents(p: Principal = Depends(authed("agents:read"))):
         return {"items": await app.state.db.list_agents(p.org_id), "available_tools": [t["name"] for t in registry.schemas()]}
 
+    async def _plan_room(org_id: str, metric: str) -> None:
+        try:
+            await app.state.plans.ensure_room(org_id, metric)
+        except QuotaExceeded as exc:
+            raise HTTPException(409, exc.message) from None
+
+    @app.get("/api/v1/plan")
+    async def api_plan(p: Principal = Depends(authed("metrics:read"))):
+        """Plan de la organización, sus límites y cuánto lleva consumido este mes. Si las cuotas no están activadas solo se mide."""
+        return {**(await app.state.plans.snapshot(p.org_id)).as_dict(), "enforced": app.state.plans.enforced}
+
     @app.post("/api/v1/agents", status_code=201)
     async def create_agent(body: CreateAgentBody, p: Principal = Depends(authed("agents:write"))):
         _check_tools(body.tools)
+        await _plan_room(p.org_id, "max_agents")
         agent = await app.state.db.create_agent(p.org_id, body.name, body.instructions, body.tools, body.voice, body.language)
         await app.state.db.audit(p.org_id, p.user_id, "agent.created", {"agent_id": agent["id"], "tools": body.tools})
         return agent
@@ -497,6 +529,120 @@ def create_app(
 
     _status_route("publish", "published", "agent.published")
     _status_route("archive", "archived", "agent.archived")
+
+    # ---------- equipo ----------
+    def _team_http(exc) -> HTTPException:
+        return {"invalid_role": HTTPException(422, "Rol inválido"), "invalid_email": HTTPException(422, "Email inválido"),
+                "forbidden": HTTPException(403, "Permiso insuficiente"), "owner_only": HTTPException(403, "Solo un owner puede dar, quitar o cambiar el rol owner"),
+                "last_owner": HTTPException(409, "La organización no puede quedarse sin owner"),
+                "org_not_found": HTTPException(404, "Organización no encontrada")}.get(exc.code, HTTPException(400, "Operación no permitida"))
+
+    @app.get("/api/v1/team")
+    async def team_list(p: Principal = Depends(authed("team:read"))):
+        """Miembros de la organización. Ojo: la plataforma no autentica con esta lista; tu proveedor de identidad debe consultarla."""
+        return {"items": await app.state.db.team_list(p.org_id)}
+
+    @app.put("/api/v1/team/{email}")
+    async def team_set(email: str, body: TeamRoleBody, p: Principal = Depends(authed("team:write"))):
+        _humans_only(p)  # una clave de API no gestiona personas
+        from app.services.persistence import TeamError
+
+        try:
+            res = await app.state.db.team_set(p.org_id, email.strip(), body.role, p.role)
+        except TeamError as exc:
+            raise _team_http(exc) from None
+        await app.state.db.audit(p.org_id, p.user_id, "team.member_set", {"user_id": res["user_id"], "role": body.role, "previous": res.get("previous")})
+        return {"email": email.strip().lower(), **res}
+
+    @app.delete("/api/v1/team/{email}", status_code=204)
+    async def team_remove(email: str, p: Principal = Depends(authed("team:write"))):
+        _humans_only(p)
+        from app.services.persistence import TeamError
+
+        try:
+            removed = await app.state.db.team_remove(p.org_id, email.strip(), p.role)
+        except TeamError as exc:
+            raise _team_http(exc) from None
+        if not removed:
+            raise HTTPException(404, "Miembro no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "team.member_removed", {"email_hash": __import__("hashlib").sha256(email.strip().lower().encode()).hexdigest()[:12]})
+        return Response(status_code=204)
+
+    # ---------- base de conocimiento ----------
+    def _kb_prepare(body: KnowledgeSourceBody):
+        import base64
+        import binascii
+        import hashlib
+
+        from app.knowledge.extract import ExtractionError, chunk, extract
+
+        if (body.content_base64 is None) == (body.text is None):
+            raise HTTPException(422, "Envía exactamente uno: content_base64 o text")
+        try:
+            raw = base64.b64decode(body.content_base64, validate=True) if body.content_base64 is not None else body.text.encode("utf-8")
+        except (binascii.Error, ValueError):
+            raise HTTPException(422, "content_base64 no es base64 válido") from None
+        try:
+            text, kind = extract(raw, body.kind)
+        except ExtractionError as exc:
+            raise HTTPException(422, str(exc)) from None
+        return kind, hashlib.sha256(raw).hexdigest(), len(raw), chunk(text)
+
+    async def _kb_check_quota(org_id: str, new_chunks: int, replacing: int = 0, new_source: bool = True) -> None:
+        sources, chunks = await app.state.repo.kb_totals(org_id)
+        if new_source and sources >= s.kb_max_sources:
+            raise HTTPException(409, f"Máximo {s.kb_max_sources} documentos por organización")
+        if chunks - replacing + new_chunks > s.kb_max_chunks:
+            raise HTTPException(409, "La base de conocimiento alcanzó su tamaño máximo; elimina documentos antes de añadir más")
+
+    @app.post("/api/v1/knowledge/sources", status_code=201)
+    async def kb_add(body: KnowledgeSourceBody, p: Principal = Depends(authed("knowledge:write"))):
+        kind, checksum, size, chunks = _kb_prepare(body)
+        for existing in await app.state.repo.kb_list(p.org_id):
+            if existing["checksum"] == checksum:
+                raise HTTPException(409, f"Ese documento ya está cargado ({existing['name']}). Para actualizarlo usa PUT /knowledge/sources/{existing['id']}")
+        await _kb_check_quota(p.org_id, len(chunks))
+        await _plan_room(p.org_id, "max_kb_sources")
+        src = await app.state.repo.kb_create(p.org_id, body.name.strip(), kind, checksum, size, chunks, p.user_id)
+        await app.state.db.audit(p.org_id, p.user_id, "knowledge.added", {"source_id": src["id"], "kind": kind, "chunks": len(chunks)})
+        return src
+
+    @app.put("/api/v1/knowledge/sources/{source_id}")
+    async def kb_replace(source_id: str, body: KnowledgeSourceBody, p: Principal = Depends(authed("knowledge:write"))):
+        """Sustituye el documento (versión + 1): los fragmentos anteriores se eliminan, sin periodo en que mezclen versiones."""
+        old = await app.state.repo.kb_get(p.org_id, _valid_id(source_id))
+        if not old:
+            raise HTTPException(404, "Documento no encontrado")
+        kind, checksum, size, chunks = _kb_prepare(body)
+        await _kb_check_quota(p.org_id, len(chunks), replacing=old["chunk_count"], new_source=False)
+        src = await app.state.repo.kb_replace(p.org_id, source_id, body.name.strip(), kind, checksum, size, chunks)
+        await app.state.db.audit(p.org_id, p.user_id, "knowledge.replaced", {"source_id": source_id, "version": src["version"], "chunks": len(chunks)})
+        return src
+
+    @app.get("/api/v1/knowledge/sources")
+    async def kb_list(p: Principal = Depends(authed("knowledge:read"))):
+        return {"items": await app.state.repo.kb_list(p.org_id)}
+
+    @app.get("/api/v1/knowledge/sources/{source_id}")
+    async def kb_get(source_id: str, p: Principal = Depends(authed("knowledge:read"))):
+        src = await app.state.repo.kb_get(p.org_id, _valid_id(source_id))
+        if not src:
+            raise HTTPException(404, "Documento no encontrado")
+        return src
+
+    @app.delete("/api/v1/knowledge/sources/{source_id}", status_code=204)
+    async def kb_delete(source_id: str, p: Principal = Depends(authed("knowledge:write"))):
+        if not await app.state.repo.kb_delete(p.org_id, _valid_id(source_id)):
+            raise HTTPException(404, "Documento no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "knowledge.deleted", {"source_id": source_id})
+        return Response(status_code=204)
+
+    @app.get("/api/v1/knowledge/search")
+    async def kb_search(q: str, p: Principal = Depends(authed("knowledge:read"))):
+        """Lo que recuperaría el agente para una pregunta: sirve para comprobar que el documento responde lo esperado."""
+        if not 2 <= len(q.strip()) <= 200:
+            raise HTTPException(422, "La consulta debe tener entre 2 y 200 caracteres")
+        return {"results": await app.state.repo.search_kb(p.org_id, q.strip())}
 
     # ---------- pedidos y clientes ----------
     @app.put("/api/v1/orders/{order_id}")
@@ -679,6 +825,7 @@ def create_app(
     @app.post("/api/v1/phone-numbers", status_code=201)
     async def add_phone(body: PhoneNumberBody, p: Principal = Depends(authed("phones:write"))):
         _check_transfer_target(body.transfer_number)
+        await _plan_room(p.org_id, "max_phone_numbers")
         if body.agent_id is not None:
             await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
         try:
@@ -794,6 +941,11 @@ def create_app(
             voice=opts.get("voice") or (agent or {}).get("voice"),
             language=opts.get("language") or (agent or {}).get("language"))
         session_key = uuid.uuid4().hex
+        try:
+            await app.state.plans.ensure_minutes(principal.org_id)
+        except QuotaExceeded:
+            await ws.close(code=WS_CLOSE_CAPACITY)
+            return
         remaining = await budget_remaining_s(principal.org_id)
         if remaining <= 0 or len(live) >= s.max_total_sessions:
             BUDGET_REJECTED.labels("org_daily_budget" if remaining <= 0 else "global_concurrency").inc()
@@ -816,6 +968,7 @@ def create_app(
             except Exception:  # noqa: BLE001
                 log.exception("usage_accounting_failed", session=sess.id)
             await release_quietly(app.state.store, principal.org_id, session_key)
+            await app.state.plans.maybe_alert(principal.org_id)
 
         session: VoiceSession | None = None
         loop = asyncio.get_running_loop()

@@ -89,6 +89,24 @@ async def set_member(engine: AsyncEngine, org_id: str, email: str, role: str) ->
     return {"org_id": org_id, "user_id": uid, "email": email, "role": role, "previous_role": current}
 
 
+async def set_plan(engine: AsyncEngine, org_id: str, plan: str) -> dict:
+    from app.billing.plans import PLAN_IDS
+
+    try:
+        uuid.UUID(org_id)
+    except ValueError:
+        raise ProvisioningError("org_id debe ser un UUID") from None
+    if plan not in PLAN_IDS:
+        raise ProvisioningError(f"Plan inválido; usa uno de {list(PLAN_IDS)}")
+    async with engine.begin() as c:
+        row = (await c.execute(text("UPDATE organizations SET plan = :p WHERE id = :o RETURNING plan"), {"p": plan, "o": org_id})).first()
+        if not row:
+            raise ProvisioningError("La organización no existe")
+        await c.execute(text("INSERT INTO audit_logs (org_id, actor, action, detail) VALUES (:o, 'platform', 'org.plan_changed', CAST(:d AS jsonb))"),
+                        {"o": org_id, "d": json.dumps({"plan": plan})})
+    return {"org_id": org_id, "plan": plan}
+
+
 async def list_members(engine: AsyncEngine, org_id: str) -> list[dict]:
     try:
         uuid.UUID(org_id)
