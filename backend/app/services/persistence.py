@@ -49,6 +49,7 @@ class Persistence(Protocol):
     async def list_phone_numbers(self, org_id: str) -> list[dict[str, Any]]: ...
     async def add_phone_number(self, org_id: str, e164: str, agent_id: str | None) -> dict[str, Any]: ...
     async def delete_phone_number(self, org_id: str, phone_id: str) -> bool: ...
+    async def resolve_phone_number(self, e164: str) -> dict[str, Any] | None: ...
     async def org_policy(self, org_id: str) -> dict[str, Any]: ...
     async def set_conversation_options(self, org_id: str, conversation_id: str, *, recording_consent: bool,
                                        voice: str | None, language: str | None) -> None: ...
@@ -162,6 +163,13 @@ class InMemoryPersistence:
         pid = str(uuid.uuid4())
         self.phones[pid] = {"id": pid, "org_id": org_id, "e164": e164, "agent_id": agent_id}
         return dict(self.phones[pid])
+
+    async def resolve_phone_number(self, e164):
+        n = next((n for n in self.phones.values() if n["e164"] == e164), None)
+        if n is None:
+            return None
+        a = self.agents.get(n["agent_id"]) if n["agent_id"] else None
+        return {"org_id": n["org_id"], "agent_id": n["agent_id"], "agent_status": a["status"] if a else None}
 
     async def delete_phone_number(self, org_id, phone_id):
         n = self.phones.get(phone_id)

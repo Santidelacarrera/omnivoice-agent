@@ -7,7 +7,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
-from app.database.engine import org_transaction
+from app.database.engine import get_engine, org_transaction
 from app.observability.metrics import ERRORS
 from app.services.persistence import _VERSIONED, COST_PER_AUDIO_MINUTE_USD, PhoneNumberTaken
 
@@ -237,6 +237,12 @@ class PostgresPersistence:
         except IntegrityError as exc:
             raise PhoneNumberTaken(e164) from exc
         return {"id": pid, "e164": e164, "agent_id": agent_id}
+
+    async def resolve_phone_number(self, e164):
+        """Búsqueda global por número vía la función SECURITY DEFINER de la migración 006 (no hay org todavía)."""
+        async with get_engine().connect() as c:
+            r = (await c.execute(text("SELECT org_id, agent_id, agent_status FROM resolve_phone_number(:e)"), {"e": e164})).first()
+        return {"org_id": str(r[0]), "agent_id": str(r[1]) if r[1] else None, "agent_status": r[2]} if r else None
 
     async def delete_phone_number(self, org_id, phone_id):
         async with org_transaction(org_id) as c:

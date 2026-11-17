@@ -77,14 +77,31 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                 ERRORS.labels("telephony_bad_signature").inc()
                 raise HTTPException(403, "Firma inválida")
         call_sid, who = form.get("CallSid", ""), form.get("From", "")
-        org = s.telephony_org_id
+        outbound = form.get("Direction", "").startswith("outbound")
+        # El número de la plataforma es el destino en llamadas entrantes y el origen en las salientes.
+        ours = form.get("From", "") if outbound else form.get("To", "")
+        mapped = await app.state.db.resolve_phone_number(ours) if ours else None
+        if mapped:
+            org, agent_id = mapped["org_id"], mapped["agent_id"] or ""
+            if not agent_id or mapped["agent_status"] != "published":
+                # Sin agente o sin publicar: no se contesta con otra cosa (un borrador o archivado no atiende clientes).
+                ERRORS.labels("telephony_agent_unavailable").inc()
+                await app.state.db.audit(org, "telephony", "telephony.call_rejected",
+                                         {"call_sid": call_sid, "reason": "agent_not_published" if agent_id else "no_agent"})
+                return Response(hangup_twiml("Este número no está disponible por ahora."), media_type="text/xml")
+        elif s.telephony_allow_unmapped:
+            org, agent_id = s.telephony_org_id, s.telephony_agent_id
+        else:
+            ERRORS.labels("telephony_unmapped").inc()
+            log.warning("telephony_unmapped_number", number_hash=caller_id_hash(ours))
+            return Response(hangup_twiml("El número marcado no está disponible."), media_type="text/xml")
         if not await app.state.store.hit("telephony", f"{org}:{caller_id_hash(who)}", s.rate_limit_sessions_per_min, 60):
             return Response(hangup_twiml("Demasiados intentos. Inténtelo más tarde."), media_type="text/xml")
         if await app.state.store.active_sessions(org) >= s.max_sessions_per_org:
             return Response(hangup_twiml("Todas las líneas están ocupadas. Inténtelo más tarde."), media_type="text/xml")
         principal = Principal(f"phone:{caller_id_hash(who)}", org, "customer")
         ticket = uuid.uuid4().hex
-        await app.state.store.put_ticket(f"tel:{ticket}", principal, 60, s.telephony_agent_id or None)
+        await app.state.store.put_ticket(f"tel:{ticket}", principal, 60, agent_id or None)
         await app.state.db.audit(org, principal.user_id, "telephony.call_received",
                                  {"call_sid": call_sid, "direction": form.get("Direction", "inbound")})
         ws_url = public_url("/ws/telephony").replace("https://", "wss://", 1)

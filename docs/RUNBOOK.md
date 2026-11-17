@@ -73,3 +73,9 @@ python -m app.migrate up          # aplica las pendientes (cada archivo en su tr
 - Si `up` falla, el archivo se revierte y no queda registrado; corrige y repite. Dos ejecuciones simultáneas se rechazan.
 - `docker-compose` sigue aplicando `migrations/*.sql` con `initdb` solo en el primer arranque de un volumen vacío; esa base queda sin registro
   y requiere `baseline --through <última>` antes del primer `up` posterior.
+
+## Enrutado de llamadas por número
+Cada llamada se asigna por el número marcado (`To`; en salientes, `From`) usando `phone_numbers`: ese número fija la organización y el agente.
+- Solo contesta un agente **publicado** (`POST /api/v1/agents/{id}/publish`). Borrador, archivado o número sin agente → mensaje y colgado, con `telephony.call_rejected` en auditoría.
+- Número sin asignar: por defecto usa `TELEPHONY_ORG_ID`/`TELEPHONY_AGENT_ID` (compatibilidad). En producción multi-cliente pon `TELEPHONY_ALLOW_UNMAPPED=false` para rechazarlos.
+- La búsqueda usa la función `resolve_phone_number` (migración 006, `SECURITY DEFINER`): su dueño debe ser el rol de migraciones, que no está sujeto a RLS (en la imagen oficial de PostgreSQL lo es). No lista números: solo resuelve uno exacto.

@@ -16,7 +16,8 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [x] T2.8 Cobertura (líneas + ramas) medida en CI con umbral 80 % en pruebas unitarias (hoy 81,4 %); la de integración se publica sin umbral. Pendiente: combinar ambas y subir el umbral, y cubrir `state_store` Redis, `telephony/twilio.py` y `realtime/provider.py` (OpenAI), los más bajos.
 
 ## ETAPA 3 — Telefonía
-- [ ] Usar `phone_numbers` en `/telephony/voice` para resolver organización y agente (hoy global); rechazar agente inactivo.
+- [x] Usar `phone_numbers` en `/telephony/voice` para resolver organización y agente; solo atiende un agente `published` (borrador, archivado o sin agente → mensaje y colgado, con auditoría). Función `resolve_phone_number` (migración 006, SECURITY DEFINER, solo búsqueda exacta). `TELEPHONY_ALLOW_UNMAPPED=false` rechaza números sin asignar.
+- [ ] Pendiente de esta línea: el número de origen de las llamadas salientes (`TWILIO_FROM_NUMBER`) sigue siendo global; debe salir del número de la organización.
 - [ ] Interfaz `TelephonyProvider` + tabla `calls`/`call_events`; estados CREATED…TRANSFERRED; idempotencia por `CallSid`+evento.
 - [ ] Transferencia a humano con contexto; `POST /calls/{id}/transfer|end`; llamadas salientes con horarios, reintentos y consentimiento.
 - [ ] Evaluar SIP directo (verificar condiciones del proveedor antes).

@@ -111,6 +111,8 @@ class Settings(BaseSettings):
     telephony_org_id: str = "00000000-0000-0000-0000-000000000001"  # organización que atiende las llamadas entrantes
     telephony_agent_id: str = ""  # agente que contesta (vacío = agente por defecto)
     telephony_language: str = "es"
+    # Número sin asignar en phone_numbers: True = usa TELEPHONY_ORG_ID/TELEPHONY_AGENT_ID (compatibilidad); False = se rechaza (multi-tenant estricto).
+    telephony_allow_unmapped: bool = True
     human_transfer_number: str = ""  # número E.164 del operador/cola humana
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
     twilio_validate_signature: bool = True
