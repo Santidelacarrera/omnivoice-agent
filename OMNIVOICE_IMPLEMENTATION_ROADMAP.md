@@ -13,7 +13,7 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [x] T2.5 Pruebas: permisos por rol, versionado/rollback, aislamiento entre organizaciones, unicidad de números.
 - [x] T2.6 Alta de organizaciones y usuarios: CLI de operador (`create-org`, `set-member`, `list-members`) con `ADMIN_DATABASE_URL`; deliberadamente NO por HTTP, porque `omni_app` no puede tocar `users`/`memberships` (último owner protegido, auditado).
 - [x] T2.7 Migraciones con versión: `python -m app.migrate status|up|baseline` (tabla `schema_migrations`, checksum inmutable, transacción por archivo, candado consultivo, `baseline` obligatorio para bases previas). CI lo usa en lugar del bucle `psql`.
-- [ ] T2.8 Cobertura medida en CI (umbral inicial 80 %).
+- [x] T2.8 Cobertura (líneas + ramas) medida en CI con umbral 80 % en pruebas unitarias (hoy 81,4 %); la de integración se publica sin umbral. Pendiente: combinar ambas y subir el umbral, y cubrir `state_store` Redis, `telephony/twilio.py` y `realtime/provider.py` (OpenAI), los más bajos.
 
 ## ETAPA 3 — Telefonía
 - [ ] Usar `phone_numbers` en `/telephony/voice` para resolver organización y agente (hoy global); rechazar agente inactivo.

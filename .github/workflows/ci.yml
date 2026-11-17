@@ -20,7 +20,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          pytest -q --tb=short -rfE 2>&1 | tee /tmp/pytest.out || rc=$?
+          # Cobertura de líneas y ramas con umbral mínimo: baja de 80 % = el job falla. Subirlo cuando crezca, no bajarlo.
+          pytest -q --tb=short -rfE --cov --cov-report=term --cov-fail-under=80 2>&1 | tee /tmp/pytest.out || rc=$?
           # Los fallos se publican como anotaciones para verlos sin descargar logs.
           grep -E '^(FAILED|ERROR)|^E ' /tmp/pytest.out | head -25 | while IFS= read -r l; do echo "::error::${l:0:400}"; done || true
           if [ "${rc:-0}" != 0 ]; then tail -n 15 /tmp/pytest.out | while IFS= read -r l; do echo "::error::tail ${l:0:300}"; done; fi
@@ -91,7 +92,8 @@ jobs:
           TEST_REDIS_URL: redis://localhost:6379/0
         run: |
           set -o pipefail
-          pytest tests/integration -q --tb=short -rfE 2>&1 | tee /tmp/it.out || rc=$?
+          # Cobertura solo informativa: cuánto cubren estas pruebas por sí solas (persistencia PostgreSQL, migraciones, aprovisionamiento).
+          pytest tests/integration -q --tb=short -rfE --cov --cov-report=term 2>&1 | tee /tmp/it.out || rc=$?
           grep -E '^(FAILED|ERROR)|^E ' /tmp/it.out | head -25 | while IFS= read -r l; do echo "::error::${l:0:400}"; done || true
           exit ${rc:-0}
   frontend:
