@@ -20,6 +20,7 @@ from app.observability.metrics import (
     RECORDINGS,
     SessionMetrics,
 )
+from app.orchestration.policy import compose_instructions
 from app.orchestration.state_machine import InvalidTransition, SessionStateMachine, State
 from app.realtime.provider import RealtimeProvider
 from app.realtime.vad import create_vad
@@ -117,7 +118,7 @@ class VoiceSession:
 
     async def start(self) -> None:
         self.conversation_id = await self.db.start_conversation(self.principal.org_id, self.id, self.principal.user_id)
-        self._full_instructions = self.instructions + language_directive(self.options.language)
+        self._full_instructions = compose_instructions(self.instructions, language_directive(self.options.language))
         await asyncio.wait_for(
             self.provider.connect(self._full_instructions, self.registry.schemas(self.allowed_tools),
                                   voice=self.options.voice, language=self.options.language),

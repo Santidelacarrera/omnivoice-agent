@@ -102,6 +102,7 @@ def create_app(
     recording_storage: RecordingStorage | None = None,
     retention_backend: RetentionBackend | None = None,
     twilio: Any = None,
+    simulator_llm: Any = None,
 ) -> FastAPI:
     s = settings or get_settings()
     live: dict[str, VoiceSession] = {}
@@ -344,6 +345,36 @@ def create_app(
         agent = await app.state.db.create_agent(p.org_id, body.name, body.instructions, body.tools, body.voice, body.language)
         await app.state.db.audit(p.org_id, p.user_id, "agent.created", {"agent_id": agent["id"], "tools": body.tools})
         return agent
+
+    class SimulateBody(BaseModel):
+        model_config = ConfigDict(extra="forbid")
+        turns: list[str] = Field(min_length=1, max_length=10)
+
+    @app.post("/api/v1/agents/{agent_id}/simulate")
+    async def simulate_agent(agent_id: str, body: SimulateBody, p: Principal = Depends(authed("agents:write"))):
+        """Prueba un agente (también en borrador) con una conversación de texto sobre herramientas de demostración."""
+        agent = await _agent_or_404(p.org_id, agent_id)
+        if agent["status"] == "archived":
+            raise HTTPException(409, "Un agente archivado no se puede probar")
+        llm = simulator_llm or getattr(app.state, "simulator_llm", None)
+        if llm is None and s.anthropic_api_key:
+            from app.realtime.cascade import AnthropicLLM
+
+            llm = app.state.simulator_llm = AnthropicLLM(s)
+        if llm is None:
+            raise HTTPException(503, "Simulador no configurado (falta ANTHROPIC_API_KEY)")
+        if not await app.state.store.hit("simulate", p.org_id, s.simulate_per_minute, 60):
+            raise HTTPException(429, "Demasiadas simulaciones; espera un minuto")
+        from app.orchestration.simulator import SimulationError, simulate
+
+        try:
+            result = await simulate(s, llm, agent, p.org_id, body.turns)
+        except SimulationError as exc:
+            raise HTTPException(exc.status, exc.message) from None
+        await app.state.db.audit(p.org_id, p.user_id, "agent.simulated",
+                                 {"agent_id": agent_id, "turns": len(body.turns), "tokens_in": result["usage"]["in"],
+                                  "tokens_out": result["usage"]["out"]})  # no se guardan las frases de prueba
+        return result
 
     def _check_tools(tools):
         unknown = set(tools) - {t["name"] for t in registry.schemas()}

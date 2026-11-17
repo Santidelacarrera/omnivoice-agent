@@ -28,8 +28,9 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] Evaluar SIP directo (verificar condiciones del proveedor antes).
 
 ## ETAPA 4 — IA
-- [ ] Memoria separada (llamada / cliente / conocimiento) y reglas de incertidumbre en prompt base.
-- [ ] Entorno de simulación de conversaciones para agentes en borrador.
+- [x] Reglas base de plataforma antepuestas a todo agente (incertidumbre, no inventar, confirmación, sin consejo médico/legal, memoria por llamada) y modelo de memoria de tres capas documentado (`docs/AI_ORCHESTRATION.md`).
+- [x] Simulador `POST /api/v1/agents/{id}/simulate` (borradores incluidos, herramientas sobre sandbox en memoria, acotado y con límite por organización).
+- [ ] Pendiente: evaluaciones automáticas de calidad conversacional (conjuntos de casos con resultados esperados) y medir tasa de alucinación; el simulador hoy es manual.
 
 ## ETAPA 5 — Herramientas
 - [ ] Modificar/cancelar reserva, clientes, confirmaciones, finalizar/transferir llamada.

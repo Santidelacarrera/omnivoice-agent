@@ -123,6 +123,7 @@ class Settings(BaseSettings):
     outbound_poll_seconds: int = 15
     outbound_stale_claim_seconds: int = 600  # un trabajo "marcando" más tiempo que esto se recupera (réplica caída)
     outbound_scheduler_enabled: bool = True
+    simulate_per_minute: int = 10  # simulaciones de agente por organización y minuto (cada una consume el modelo)
     human_transfer_number: str = ""  # número E.164 del operador/cola humana
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
     twilio_validate_signature: bool = True
