@@ -106,6 +106,10 @@ class VoiceSession:
         self.cost_usd: float | None = None
         self._stages: dict[str, float] = {}
 
+    def recent_context(self) -> list[tuple[str, str]]:
+        """Últimos intercambios (solo en memoria) para el traspaso a un operador."""
+        return list(self._recent)
+
     async def _audit(self, action: str, detail: dict[str, Any] | None = None) -> None:
         d = {"session_id": self.id, "correlation_id": self.correlation_id, **(detail or {})}
         log.info("audit", action=action, org=self.principal.org_id, **d)

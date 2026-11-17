@@ -87,3 +87,10 @@ Cada llamada es una fila en `calls` (única por proveedor + `CallSid`) con su hi
 - Salientes: la plataforma pide a Twilio los avisos de estado en `POST /telephony/status`. **Entrantes:** configura en el número de Twilio *Status Callback URL* = `<TELEPHONY_PUBLIC_URL>/telephony/status` (método POST); sin eso solo se registran los hitos propios (CONNECTED/COMPLETED/TRANSFERRED).
 - Una segunda entrega del webhook de una llamada ya conectada o terminada se rechaza (`telephony.call_duplicate`).
 - Métrica: `omnivoice_call_events_total{status,outcome}` con `outcome` = applied | ignored | duplicate.
+
+## Transferencia a un operador
+- La transfiere el agente (herramienta `transfer_to_human`) o una persona desde el panel/API: `POST /api/v1/calls/{id}/transfer` (cuerpo opcional `{"reason": "..."}`, permiso `telephony:call`). Solo una llamada atendida (ANSWERED/CONNECTED) y con `HUMAN_TRANSFER_NUMBER` configurado; si no, 409.
+- **Contexto:** al contestar el operador, Twilio pide `POST /telephony/whisper?h=<token>` y le lee, solo a él, el motivo y los últimos intercambios (hasta ~600 caracteres). El cliente no lo oye.
+- **Privacidad:** ese texto contiene datos personales, así que **no se guarda en PostgreSQL**: vive 5 minutos en Redis/memoria, un solo uso. En la base solo queda el evento `TRANSFERRED` con `{"source", "context"}`. Si el operador no contesta en 5 minutos o ya se leyó, la llamada se conecta sin briefing.
+- La llamada transferida queda en estado final `TRANSFERRED`; el `completed` posterior de Twilio no lo cambia.
+- Finalizar: `POST /api/v1/calls/{id}/end` (cuelga; si aún no se contestó, la cancela → `CANCELLED`).

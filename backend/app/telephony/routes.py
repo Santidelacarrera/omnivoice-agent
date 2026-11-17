@@ -7,6 +7,7 @@ import time
 import uuid
 from typing import Any, Callable
 from urllib.parse import parse_qs
+from xml.sax.saxutils import escape
 
 import structlog
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
@@ -18,6 +19,7 @@ from app.orchestration.session import SessionOptions, VoiceSession
 from app.security.auth import Principal
 from app.telephony import call_state as cs
 from app.telephony.codec import platform_to_telephony, telephony_to_platform
+from app.telephony.handoff import HANDOFF_TTL_S, build_briefing
 from app.telephony.twilio import TwilioClient, dial_twiml, hangup_twiml, stream_twiml, validate_signature
 
 log = structlog.get_logger()
@@ -25,6 +27,11 @@ log = structlog.get_logger()
 WS_CLOSE_UNAUTHORIZED = 4401
 WS_CLOSE_CAPACITY = 4429
 MAX_MEDIA_BYTES = 4096  # un frame de Twilio son 160 bytes (20 ms); mucho más es anómalo
+
+
+class TransferCallBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(default="", max_length=300)
 
 
 class OutboundCallBody(BaseModel):
@@ -64,6 +71,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
     client = twilio or TwilioClient(s.twilio_account_sid, s.twilio_auth_token)
     app.state.twilio = client
     background: set[asyncio.Task] = set()
+    by_call: dict[tuple[str, str], VoiceSession] = {}  # (org, CallSid) → sesión viva, para dar contexto al traspaso
 
     async def track(org: str, sid: str, status: str, key: str, detail: dict[str, Any] | None = None) -> dict[str, Any] | None:
         """Registra un evento de la llamada. Es idempotente y nunca rompe la llamada (ADR-6)."""
@@ -159,6 +167,58 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
             raise HTTPException(404, "Llamada no encontrada")
         return call
 
+    @app.post("/telephony/whisper")
+    async def whisper(request: Request):
+        """Lo pide Twilio cuando el operador contesta: el briefing se le dice solo a él, antes de unir las dos partes."""
+        form = {k: v[0] for k, v in parse_qs((await request.body()).decode(), keep_blank_values=True).items()}
+        if s.twilio_validate_signature:
+            url = public_url(request.url.path, request.url.query)
+            if not validate_signature(s.twilio_auth_token, url, form, request.headers.get("x-twilio-signature", "")):
+                ERRORS.labels("telephony_bad_signature").inc()
+                raise HTTPException(403, "Firma inválida")
+        token = request.query_params.get("h", "")
+        data = await app.state.store.take_session_options(f"handoff:{token}") if token else {}  # un solo uso
+        text = data.get("text") if isinstance(data, dict) else None
+        body = f'<Say language="es-ES">{escape(text)}</Say>' if text else ""
+        return Response(f'<?xml version="1.0" encoding="UTF-8"?><Response>{body}</Response>', media_type="text/xml")
+
+    async def _live_call(p: Principal, call_id: str) -> dict[str, Any]:
+        try:
+            uuid.UUID(call_id)
+        except ValueError:
+            raise HTTPException(404, "Llamada no encontrada") from None
+        call = await app.state.db.get_call(p.org_id, call_id)
+        if not call or call["provider"] != "twilio":
+            raise HTTPException(404, "Llamada no encontrada")
+        if cs.is_terminal(call["status"]):
+            raise HTTPException(409, f"La llamada ya terminó ({call['status']})")
+        return call
+
+    @app.post("/api/v1/calls/{call_id}/transfer", status_code=202)
+    async def transfer_call(call_id: str, body: TransferCallBody | None = None, p: Principal = Depends(authed("telephony:call"))):
+        call = await _live_call(p, call_id)
+        if call["status"] not in (cs.ANSWERED, cs.CONNECTED):
+            raise HTTPException(409, "Solo se puede transferir una llamada atendida")
+        outcome = await _transfer(call["sid"], p.org_id, (body.reason if body else "") or "", _context(p.org_id, call["sid"]), "api")
+        if outcome.get("status") != "initiated":
+            raise HTTPException(409, "Transferencia no disponible (sin número de operador configurado)")
+        await app.state.db.audit(p.org_id, p.user_id, "call.transfer_requested", {"call_id": call_id, "source": "api"})
+        return {"status": "initiated"}
+
+    @app.post("/api/v1/calls/{call_id}/end", status_code=202)
+    async def end_call(call_id: str, p: Principal = Depends(authed("telephony:call"))):
+        call = await _live_call(p, call_id)
+        before_answer = call["status"] in (cs.CREATED, cs.QUEUED, cs.RINGING)
+        try:
+            await client.hangup(call["sid"], cancel=before_answer)
+        except Exception:  # noqa: BLE001
+            log.exception("hangup_failed", call_sid=call["sid"])
+            ERRORS.labels("telephony_hangup").inc()
+            raise HTTPException(502, "El operador de telefonía rechazó la orden") from None
+        await track(p.org_id, call["sid"], cs.CANCELLED if before_answer else cs.COMPLETED, "api:end", {"source": "api"})
+        await app.state.db.audit(p.org_id, p.user_id, "call.end_requested", {"call_id": call_id, "source": "api"})
+        return {"status": "ending"}
+
     @app.post("/api/v1/telephony/calls", status_code=202)
     async def outbound_call(body: OutboundCallBody, p: Principal = Depends(authed("telephony:call"))):
         if not s.twilio_from_number:
@@ -212,6 +272,7 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
 
                     async def on_close(sess: VoiceSession, org_id=org_id, call_sid=call_sid):
                         live.pop(session_key, None)
+                        by_call.pop((org_id, call_sid), None)
                         await track(org_id, call_sid, cs.COMPLETED, "ws:close")
                         await app.state.store.release_session(org_id, session_key)
                         try:  # mismo consumo diario que las sesiones web
@@ -229,9 +290,11 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                         options=SessionOptions(recording_consent=False,
                                                voice=(agent or {}).get("voice"),
                                                language=(agent or {}).get("language") or s.telephony_language),
-                        transfer_handler=lambda reason, sid=call_sid, o=org_id: _transfer(sid, o),
+                        transfer_handler=lambda reason, sid=call_sid, o=org_id: _transfer(sid, o, reason, _context(o, sid)),
                     )
                     live[session_key] = session
+                    if call_sid:
+                        by_call[(org_id, call_sid)] = session
                     await track(org_id, call_sid, cs.CONNECTED, "ws:start")
                     try:
                         await session.start()
@@ -259,15 +322,29 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
             elif principal is not None:
                 await app.state.store.release_session(principal.org_id, session_key)
 
-    async def _transfer(call_sid: str, org_id: str) -> dict[str, Any]:
+    def _context(org_id: str, call_sid: str) -> list[tuple[str, str]]:
+        sess = by_call.get((org_id, call_sid))
+        return sess.recent_context() if sess else []
+
+    async def _transfer(call_sid: str, org_id: str, reason: str = "", turns: list[tuple[str, str]] | None = None,
+                        source: str = "agent") -> dict[str, Any]:
         if not s.human_transfer_number or not call_sid:
             return {"status": "unavailable"}
-        await track(org_id, call_sid, cs.TRANSFERRED, "transfer")
+        whisper_url = None
+        briefing = build_briefing(reason, turns or [], source)
+        token = uuid.uuid4().hex  # un solo uso y 5 min: el contexto no se guarda en la base de datos
+        try:
+            await app.state.store.put_session_options(f"handoff:{token}", {"text": briefing}, HANDOFF_TTL_S)
+            whisper_url = public_url("/telephony/whisper", f"h={token}")
+        except Exception:  # noqa: BLE001 - sin contexto el traspaso sigue adelante
+            log.exception("handoff_context_failed")
+            ERRORS.labels("telephony_handoff_context").inc()
+        await track(org_id, call_sid, cs.TRANSFERRED, "transfer", {"source": source, "context": whisper_url is not None})
 
         async def later() -> None:
             await asyncio.sleep(s.transfer_announce_ms / 1000)  # deja que el agente termine de avisar
             try:
-                await client.redirect_call(call_sid, dial_twiml(s.human_transfer_number, s.twilio_from_number or None))
+                await client.redirect_call(call_sid, dial_twiml(s.human_transfer_number, s.twilio_from_number or None, whisper_url))
             except Exception:  # noqa: BLE001
                 log.exception("transfer_redirect_failed", call_sid=call_sid)
                 ERRORS.labels("telephony_transfer").inc()

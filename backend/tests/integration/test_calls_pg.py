@@ -24,10 +24,11 @@ pytestmark = pytest.mark.skipif(not (PG_URL and REDIS_URL), reason="requiere TES
 
 
 class FakeTwilio:
-    def __init__(self): self.calls = []
+    def __init__(self): self.calls, self.redirects = [], []
     async def create_call(self, to, from_, url, status_callback=None):
         self.calls.append((to, from_, url, status_callback)); return {"sid": "CA" + uuid.uuid4().hex, "status": "queued"}
-    async def redirect_call(self, *a, **k): return None
+    async def redirect_call(self, sid, twiml): self.redirects.append((sid, twiml))
+    async def hangup(self, sid, cancel=False): return None
 
 
 def _h(org, role="admin"):
@@ -103,3 +104,39 @@ def test_call_tables_are_isolated_and_append_only():
 
     org, none, seen, denied = asyncio.run(scenario())
     assert org == DEMO and none is None and seen == 0 and denied
+
+
+def test_transfer_with_context_on_postgres_and_redis():
+    """Traspaso real: TRANSFERRED en PostgreSQL, contexto de un solo uso en Redis (GETDEL) y sin texto de conversación en la base."""
+    import time
+    from urllib.parse import parse_qs, urlparse
+
+    tw = FakeTwilio()
+    s = _settings().model_copy(update={"human_transfer_number": "+34911111111", "transfer_announce_ms": 10})
+    with TestClient(create_app(s, twilio=tw)) as c:
+        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": "+34633333333"}).status_code == 202
+        items = c.get("/api/v1/calls", headers=_h(DEMO)).json()["items"]
+        call = [i for i in items if i["status"] == "QUEUED"][0]
+        assert c.post(f"/api/v1/calls/{call['id']}/transfer", headers=_h(DEMO), json={}).status_code == 409  # aún sin contestar
+        _status(c, call["sid"], "in-progress", "2")
+        assert c.post(f"/api/v1/calls/{call['id']}/transfer", headers=_h(DEMO, "viewer"), json={}).status_code == 403
+        assert c.post(f"/api/v1/calls/{call['id']}/transfer", headers=_h(DEMO), json={"reason": "supervisor"}).status_code == 202
+        for _ in range(100):
+            if getattr(tw, "redirects", None):
+                break
+            time.sleep(0.02)
+        twiml = tw.redirects[0][1]
+        token = parse_qs(urlparse(twiml.split('<Number url="')[1].split('"')[0].replace("&amp;", "&")).query)["h"][0]
+
+        params = {}
+        sig = compute_signature("tok", f"{PUBLIC}/telephony/whisper?h={token}", params)
+        post = lambda: c.post(f"/telephony/whisper?h={token}", content="", headers={  # noqa: E731
+            "content-type": "application/x-www-form-urlencoded", "x-twilio-signature": sig})
+        assert "supervisor" in post().text and "<Say" not in post().text
+
+        detail = c.get(f"/api/v1/calls/{call['id']}", headers=_h(DEMO)).json()
+        assert detail["status"] == "TRANSFERRED"
+        assert [e["detail"] for e in detail["events"] if e["status"] == "TRANSFERRED"] == [{"source": "api", "context": True}]
+        assert "supervisor" not in str(detail)
+        assert c.post(f"/api/v1/calls/{call['id']}/end", headers=_h(DEMO)).status_code == 409
+        assert c.post(f"/api/v1/calls/{call['id']}/transfer", headers=_h(OTHER), json={}).status_code == 404
