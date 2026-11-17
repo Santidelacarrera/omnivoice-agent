@@ -39,7 +39,8 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] Limitación conocida: el servidor verifica que el usuario respondió, no el contenido de su respuesta (un «no» también habilita el reintento). Mitigación posible: confirmación por segundo canal o clasificación de la respuesta.
 
 ## ETAPA 6 — Panel SaaS
-- [ ] Asistente de 9 pasos, números, llamadas en vivo, equipo, auditoría; Playwright.
+- [x] Páginas de **Llamadas** (lista, eventos, transferir y finalizar), **Números** (alta, agente, operador por línea) y analítica de 30 días en el **Panel**. Verificadas con typecheck, build y carga real contra el backend; sin pruebas automatizadas de interfaz.
+- [ ] Pendiente: asistente de 9 pasos para crear agentes, salientes y lista de exclusión, claves de API, webhooks, equipo, facturación, diseño responsive revisado y accesibilidad auditada, Playwright. La autenticación del panel sigue siendo el token de desarrollo: hace falta el flujo de identidad real antes de producción.
 
 ## ETAPA 7 — Conocimiento
 - [ ] Ingesta PDF/DOCX/TXT/CSV, fragmentos, embeddings (pgvector), citas, versionado.

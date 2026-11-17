@@ -13,6 +13,8 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <Link href="/dashboard">Panel</Link>
           <Link href="/agents">Agentes</Link>
           <Link href="/history">Historial</Link>
+          <Link href="/calls">Llamadas</Link>
+          <Link href="/phones">Números</Link>
           <Link href="/settings">Configuración</Link>
         </nav>
         {children}

@@ -51,6 +51,31 @@ export interface ConversationDetail extends ConversationRow {
 }
 export interface Agent { id: string; name: string; instructions: string; tools: string[]; voice: string | null; language: string }
 
+// ---- Etapas 2–3 y 9–10: llamadas, números y analítica ----
+export interface CallRow {
+  id: string; sid: string; direction: "inbound" | "outbound"; status: string; our_number: string | null;
+  created_at: number; answered_at: number | null; ended_at: number | null;
+}
+export interface CallDetail extends CallRow {
+  events: { status: string; event_key: string; applied: boolean; detail: Record<string, unknown>; ts: number }[];
+}
+export interface PhoneNumber { id: string; e164: string; agent_id: string | null; transfer_number: string | null }
+export interface Analytics {
+  period_days: number;
+  calls: { total: number; inbound: number; outbound: number; answered: number; missed: number; transferred: number; avg_duration_s: number | null };
+  rates: { answer_rate: number | null; missed_rate: number | null; transfer_rate: number | null };
+  by_day: { date: string; calls: number; answered: number; missed: number; transferred: number }[];
+}
+
+export const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v * 100)} %`);
+export const secs = (v: number | null) => (v === null ? "—" : v >= 60 ? `${Math.floor(v / 60)} min ${Math.round(v % 60)} s` : `${Math.round(v)} s`);
+
+export const STATUS_STYLE: Record<string, string> = {
+  CONNECTED: "bg-green-100 text-green-800", ANSWERED: "bg-green-100 text-green-800", COMPLETED: "bg-slate-100 text-slate-700",
+  TRANSFERRED: "bg-indigo-100 text-indigo-800", FAILED: "bg-red-100 text-red-800", BUSY: "bg-amber-100 text-amber-800",
+  NO_ANSWER: "bg-amber-100 text-amber-800", CANCELLED: "bg-slate-100 text-slate-500",
+};
+
 export interface Catalog {
   voices: string[];
   languages: { code: string; name: string }[];
