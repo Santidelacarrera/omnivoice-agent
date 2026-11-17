@@ -12,7 +12,7 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [x] T2.4 Números telefónicos: `GET/POST /phone-numbers`, `DELETE`; E.164 único global (un número = una organización), agente asociado de la misma organización.
 - [x] T2.5 Pruebas: permisos por rol, versionado/rollback, aislamiento entre organizaciones, unicidad de números.
 - [x] T2.6 Alta de organizaciones y usuarios: CLI de operador (`create-org`, `set-member`, `list-members`) con `ADMIN_DATABASE_URL`; deliberadamente NO por HTTP, porque `omni_app` no puede tocar `users`/`memberships` (último owner protegido, auditado).
-- [ ] T2.7 Herramienta de migraciones con tabla de versiones (reemplazar bucle `psql`).
+- [x] T2.7 Migraciones con versión: `python -m app.migrate status|up|baseline` (tabla `schema_migrations`, checksum inmutable, transacción por archivo, candado consultivo, `baseline` obligatorio para bases previas). CI lo usa en lugar del bucle `psql`.
 - [ ] T2.8 Cobertura medida en CI (umbral inicial 80 %).
 
 ## ETAPA 3 — Telefonía

@@ -40,8 +40,7 @@
 Un job (activo por defecto, `RETENTION_JOB_ENABLED`) purga cada `RETENTION_INTERVAL_SECONDS` lo anterior a
 `organizations.retention_days`. Borra primero los objetos de grabación y después las filas; un bloqueo en Redis evita
 que dos réplicas lo ejecuten a la vez. La auditoría es solo-anexar y no se purga. Cada pasada deja un registro de auditoría.
-- Base existente: aplicar `migrations/004_retention_recording.sql`
-  (`docker compose exec -T postgres psql -U omni -d omnivoice < migrations/004_retention_recording.sql`) o recrear el volumen.
+- Base existente: aplicar las migraciones pendientes con el ejecutor (ver «Migraciones»).
 - Activar grabación en una organización: `UPDATE organizations SET recording_enabled = true WHERE id = ...` y configurar `RECORDING_STORAGE=s3`.
 
 ## Telefonía
@@ -60,3 +59,17 @@ Metodología completa, objetivos y resultados: `docs/LATENCY.md` (`bash bench/ru
 Informe publicable: `python -m bench.loadtest --url ... --clients 50 --duration 30 --mode real --label "..." --out r.json`
 y `python -m bench.report r.json > docs/LATENCY.md`. El loadtest usa habla sintética: ejecútalo con `VAD_BACKEND=energy`.
 Contratos con los proveedores: `OPENAI_API_KEY=... GEMINI_API_KEY=... pytest -m contract tests/contract` (cada prueba se omite si falta su clave).
+
+## Migraciones
+Con versión, desde `backend/` y con el rol de migraciones (nunca `omni_app`):
+```
+export ADMIN_DATABASE_URL=postgresql+asyncpg://omni:<clave>@<host>:5432/omnivoice
+python -m app.migrate status      # applied / pending por archivo
+python -m app.migrate up          # aplica las pendientes (cada archivo en su transacción)
+```
+- Una migración aplicada **no se edita** (el checksum lo detecta y `up` se detiene): los cambios van en un archivo nuevo `NNN_descripcion.sql`.
+- Bases anteriores a este mecanismo (creadas por `initdb` o a mano) no se migran solas. Indica hasta qué versión ya tenían:
+  `python -m app.migrate baseline --through 004` y luego `up`.
+- Si `up` falla, el archivo se revierte y no queda registrado; corrige y repite. Dos ejecuciones simultáneas se rechazan.
+- `docker-compose` sigue aplicando `migrations/*.sql` con `initdb` solo en el primer arranque de un volumen vacío; esa base queda sin registro
+  y requiere `baseline --through <última>` antes del primer `up` posterior.
