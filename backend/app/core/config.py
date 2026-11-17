@@ -141,6 +141,8 @@ class Settings(BaseSettings):
     sentry_traces_sample_rate: float = 0.0
     otel_exporter_otlp_endpoint: str = ""
     otel_service_name: str = "omnivoice-backend"
+    kb_max_sources: int = 200  # documentos por organización
+    kb_max_chunks: int = 20000  # fragmentos por organización (acota almacenamiento y coste de búsqueda)
     simulate_per_minute: int = 10  # simulaciones de agente por organización y minuto (cada una consume el modelo)
     transfer_allowed_prefixes: str = ""  # p. ej. "+56,+34": solo se permiten transferencias a números con estos prefijos; vacío = sin límite
     transfer_blocked_prefixes: str = ""  # prefijos excluidos aunque estén dentro de un prefijo permitido (rangos premium)

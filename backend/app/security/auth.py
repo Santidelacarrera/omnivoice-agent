@@ -11,14 +11,14 @@ from app.security import apikeys
 
 bearer = HTTPBearer(auto_error=False)
 
-_READ = {"agents:read", "conversations:read", "metrics:read", "calls:read"}
+_READ = {"agents:read", "conversations:read", "metrics:read", "calls:read", "knowledge:read"}
 _FULL = {*_READ, "conversations:delete", "agents:write", "agents:publish", "audit:read", "session:create",
-         "recordings:read", "telephony:call", "phones:read", "phones:write", "outbound:write", "apikeys:write", "webhooks:write", "orders:write", "customers:write"}
+         "recordings:read", "telephony:call", "phones:read", "phones:write", "outbound:write", "apikeys:write", "webhooks:write", "orders:write", "customers:write", "knowledge:write"}
 ROLE_PERMISSIONS: dict[str, set[str]] = {
     "owner": set(_FULL),
     "admin": set(_FULL),
     "manager": {*_READ, "agents:write", "agents:publish", "session:create", "telephony:call", "phones:read", "audit:read",
-                "outbound:write", "orders:write"},
+                "outbound:write", "orders:write", "knowledge:write"},
     "operator": {*_READ, "session:create", "telephony:call", "phones:read"},
     "analyst": {*_READ, "phones:read", "audit:read"},
     "viewer": set(_READ),

@@ -127,15 +127,81 @@ class PostgresRepository:
             )
         return {"ticket_id": tid, **data}
 
+    @staticmethod
+    def _or_query(query: str) -> tuple[str, dict[str, str]]:
+        """Consulta «cualquiera de las palabras» (OR): una pregunta en lenguaje natural trae palabras que el documento no usa, y con AND
+        (plainto_tsquery) no encontraría nada. Cada palabra pasa por `plainto_tsquery` como parámetro, así que no hay inyección ni errores
+        de sintaxis; las palabras vacías (artículos, preposiciones) producen una consulta vacía que no aporta nada."""
+        import re
+
+        words = list(dict.fromkeys(w.lower() for w in re.findall(r"\w{3,}", query, re.UNICODE)))[:8]
+        expr = " || ".join(f"plainto_tsquery('spanish', :w{i})" for i in range(len(words))) or "plainto_tsquery('spanish', '')"
+        return expr, {f"w{i}": w for i, w in enumerate(words)}
+
     async def search_kb(self, org_id: str, query: str) -> list[dict[str, Any]]:
+        """Documentos (fragmentos con fuente) y filas heredadas de `knowledge_base`, ordenados por relevancia."""
+        expr, params = self._or_query(query)
         async with org_transaction(org_id) as c:
-            rows = (
-                await c.execute(
-                    text(
-                        "SELECT title, left(body, 240) AS snippet FROM knowledge_base WHERE org_id = :o "
-                        "AND to_tsvector('spanish', title || ' ' || body) @@ plainto_tsquery('spanish', :q) LIMIT 5"
-                    ),
-                    {"o": org_id, "q": query},
-                )
-            ).all()
-        return [{"title": r.title, "snippet": r.snippet} for r in rows]
+            rows = (await c.execute(text(  # noqa: S608 - `expr` se construye solo con parámetros enlazados
+                "SELECT s.name AS title, left(k.body, 400) AS snippet, s.id AS source_id, k.ordinal AS ordinal, ts_rank(k.tsv, qq.q) AS r "
+                "FROM kb_chunks k JOIN kb_sources s ON s.id = k.source_id, (SELECT " + expr + " AS q) qq "  # noqa: S608 - `expr` usa solo parámetros enlazados
+                "WHERE k.org_id = :o AND k.tsv @@ qq.q ORDER BY r DESC LIMIT 5"), {"o": org_id, **params})).all()
+            legacy = (await c.execute(text(  # noqa: S608
+                "SELECT title, left(body, 240) AS snippet FROM knowledge_base, (SELECT " + expr + " AS q) qq WHERE org_id = :o "  # noqa: S608 - `expr` usa solo parámetros enlazados
+                "AND to_tsvector('spanish', title || ' ' || body) @@ qq.q LIMIT 5"), {"o": org_id, **params})).all()
+        out = [{"title": r.title, "snippet": r.snippet, "source_id": str(r.source_id), "ordinal": r.ordinal} for r in rows]
+        return (out + [{"title": r.title, "snippet": r.snippet} for r in legacy])[:5]
+
+    async def kb_create(self, org_id: str, name: str, kind: str, checksum: str, size: int, chunks: list[str], created_by: str | None) -> dict[str, Any]:
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text(
+                "INSERT INTO kb_sources (org_id, name, kind, bytes, chars, chunk_count, checksum, created_by) "
+                "VALUES (:o, :n, :k, :b, :ch, :cc, :cs, :by) RETURNING id, version, created_at, updated_at"),
+                {"o": org_id, "n": name, "k": kind, "b": size, "ch": sum(len(x) for x in chunks), "cc": len(chunks), "cs": checksum, "by": created_by})).first()
+            await self._kb_insert_chunks(c, org_id, str(r[0]), chunks)
+        return {"id": str(r[0]), "name": name, "kind": kind, "version": r[1], "bytes": size, "chars": sum(len(x) for x in chunks),
+                "chunk_count": len(chunks), "checksum": checksum, "created_by": created_by, "created_at": r[2].timestamp(), "updated_at": r[3].timestamp()}
+
+    @staticmethod
+    async def _kb_insert_chunks(c, org_id: str, source_id: str, chunks: list[str]) -> None:
+        for i, body in enumerate(chunks):
+            await c.execute(text("INSERT INTO kb_chunks (org_id, source_id, ordinal, body) VALUES (:o, :s, :i, :b)"),
+                            {"o": org_id, "s": source_id, "i": i, "b": body})
+
+    _KB_COLS = "id, name, kind, version, bytes, chars, chunk_count, checksum, created_by, created_at, updated_at"
+
+    @staticmethod
+    def _kb_row(r) -> dict[str, Any]:
+        return {"id": str(r[0]), "name": r[1], "kind": r[2], "version": r[3], "bytes": r[4], "chars": r[5], "chunk_count": r[6],
+                "checksum": r[7], "created_by": r[8], "created_at": r[9].timestamp(), "updated_at": r[10].timestamp()}
+
+    async def kb_replace(self, org_id: str, source_id: str, name: str, kind: str, checksum: str, size: int, chunks: list[str]) -> dict[str, Any] | None:
+        async with org_transaction(org_id) as c:
+            n = (await c.execute(text(
+                "UPDATE kb_sources SET name = :n, kind = :k, bytes = :b, chars = :ch, chunk_count = :cc, checksum = :cs, version = version + 1, "
+                "updated_at = now() WHERE id = :i AND org_id = :o"),
+                {"n": name, "k": kind, "b": size, "ch": sum(len(x) for x in chunks), "cc": len(chunks), "cs": checksum, "i": source_id, "o": org_id})).rowcount
+            if not n:
+                return None
+            await c.execute(text("DELETE FROM kb_chunks WHERE source_id = :i AND org_id = :o"), {"i": source_id, "o": org_id})
+            await self._kb_insert_chunks(c, org_id, source_id, chunks)
+        return await self.kb_get(org_id, source_id)
+
+    async def kb_list(self, org_id: str) -> list[dict[str, Any]]:
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT " + self._KB_COLS + " FROM kb_sources WHERE org_id = :o ORDER BY updated_at DESC"), {"o": org_id})).all()  # noqa: S608
+        return [self._kb_row(r) for r in rows]
+
+    async def kb_get(self, org_id: str, source_id: str) -> dict[str, Any] | None:
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT " + self._KB_COLS + " FROM kb_sources WHERE id = :i AND org_id = :o"), {"i": source_id, "o": org_id})).first()  # noqa: S608
+        return self._kb_row(r) if r else None
+
+    async def kb_delete(self, org_id: str, source_id: str) -> bool:
+        async with org_transaction(org_id) as c:
+            return bool((await c.execute(text("DELETE FROM kb_sources WHERE id = :i AND org_id = :o"), {"i": source_id, "o": org_id})).rowcount)
+
+    async def kb_totals(self, org_id: str) -> tuple[int, int]:
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT count(*), COALESCE(sum(chunk_count), 0) FROM kb_sources WHERE org_id = :o"), {"o": org_id})).first()
+        return int(r[0]), int(r[1])
