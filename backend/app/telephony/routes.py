@@ -323,6 +323,12 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
         await app.state.db.audit(p.org_id, p.user_id, "dnc.removed", {"id": dnc_id})
         return Response(status_code=204)
 
+    @app.post("/api/v1/calls", status_code=202)
+    async def create_call(body: OutboundCallBody, p: Principal = Depends(authed("outbound:write"))):
+        """Crea una llamada saliente (nombre del documento maestro). Equivale a /outbound-calls; añade `call_sid` si ya se marcó."""
+        res = await create_outbound(body, p)
+        return {**res, "call_sid": res.get("last_call_sid")}
+
     @app.post("/api/v1/telephony/calls", status_code=202, deprecated=True)
     async def outbound_call(body: OutboundCallBody, p: Principal = Depends(authed("outbound:write"))):
         """Obsoleto: use /api/v1/outbound-calls. Mismas reglas (consentimiento, horario, exclusión, duplicados)."""
@@ -425,12 +431,19 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
 
     async def operator_number(org_id: str, call_sid: str) -> str:
         """Operador de la línea por la que entró/salió la llamada; si no tiene, el global (HUMAN_TRANSFER_NUMBER)."""
+        from app.telephony.destinations import is_allowed, parse_prefixes
+
+        target = s.human_transfer_number
         call = await app.state.db.get_call_by_sid(org_id, "twilio", call_sid) if call_sid else None
         if call and call.get("our_number"):
             for n in await app.state.db.list_phone_numbers(org_id):
                 if n["e164"] == call["our_number"] and n.get("transfer_number"):
-                    return n["transfer_number"]
-        return s.human_transfer_number
+                    target = n["transfer_number"]
+        # Defensa en profundidad: la configuración pudo cambiar después de guardar el número.
+        if target and not is_allowed(target, parse_prefixes(s.transfer_allowed_prefixes), parse_prefixes(s.transfer_blocked_prefixes)):
+            ERRORS.labels("transfer_destination_blocked").inc()
+            return ""
+        return target
 
     async def _transfer(call_sid: str, org_id: str, reason: str = "", turns: list[tuple[str, str]] | None = None,
                         source: str = "agent") -> dict[str, Any]:

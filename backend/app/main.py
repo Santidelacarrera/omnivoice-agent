@@ -605,8 +605,16 @@ def create_app(
     async def list_phones(p: Principal = Depends(authed("phones:read"))):
         return {"items": await app.state.db.list_phone_numbers(p.org_id)}
 
+    def _check_transfer_target(number: str | None) -> None:
+        """Limita a qué números se puede desviar una llamada (fraude por números de tarificación especial)."""
+        from app.telephony.destinations import is_allowed, parse_prefixes
+
+        if number and not is_allowed(number, parse_prefixes(s.transfer_allowed_prefixes), parse_prefixes(s.transfer_blocked_prefixes)):
+            raise HTTPException(422, "Ese número de transferencia no está permitido en esta plataforma")
+
     @app.post("/api/v1/phone-numbers", status_code=201)
     async def add_phone(body: PhoneNumberBody, p: Principal = Depends(authed("phones:write"))):
+        _check_transfer_target(body.transfer_number)
         if body.agent_id is not None:
             await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
         try:
@@ -621,6 +629,7 @@ def create_app(
         changes = body.model_dump(exclude_unset=True)
         if not changes:
             raise HTTPException(422, "Sin cambios")
+        _check_transfer_target(changes.get("transfer_number"))
         if changes.get("agent_id"):
             await _agent_or_404(p.org_id, changes["agent_id"])
         phone = await app.state.db.update_phone_number(p.org_id, _valid_id(phone_id), changes)

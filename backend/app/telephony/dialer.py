@@ -5,13 +5,14 @@ El planificador toma los trabajos vencidos (de forma atómica: varias réplicas 
 (ocupado, sin respuesta, fallo, completada) decide si se reintenta, se agota o termina. Ver app/telephony/outbound.py para la política.
 """
 import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import structlog
 
 from app.core.config import Settings
-from app.observability.metrics import ERRORS, OUTBOUND_JOBS
+from app.observability.metrics import CALLS_ABANDONED, ERRORS, OUTBOUND_JOBS
 from app.services.persistence import OutboundRejected
 from app.telephony import call_state as cs
 from app.telephony import outbound as ob
@@ -187,11 +188,34 @@ class Dialer:
         if call_status in ob.RETRYABLE_CALL_STATES or call_status in (cs.COMPLETED, cs.TRANSFERRED, cs.CANCELLED):
             await self._finish(org_id, datetime.now(timezone.utc), call_status, call_sid=call_sid)
 
+    # ---------- llamadas abandonadas ----------
+    async def reap(self, now: datetime | None = None) -> int:
+        """Cierra como FAILED las llamadas que quedaron sin final (el proveedor dejó de avisar o la réplica cayó).
+
+        Sin esto una llamada perdida cuenta como «en curso» para siempre, bloquea el cupo de reintentos de su trabajo y ensucia la analítica.
+        Pasa por `track`, así que dispara los mismos efectos que cualquier fallo: evento de webhook, resultado del trabajo saliente y métricas.
+        """
+        now = now or datetime.now(timezone.utc)
+        stale = await self.db.find_stale_calls(now, self.s.call_stale_pre_answer_s, self.s.call_stale_live_s)
+        for c in stale:
+            CALLS_ABANDONED.labels(c["status"]).inc()
+            if c["status"] in (cs.ANSWERED, cs.CONNECTED):
+                try:  # best-effort: si la llamada seguía viva en el proveedor, se corta
+                    await self.client.hangup(c["sid"])
+                except Exception:  # noqa: BLE001
+                    log.warning("abandoned_hangup_failed", status=c["status"])
+            await self.track(c["org_id"], c["sid"], cs.FAILED, "abandoned", {"reason": "abandoned", "from": c["status"]})
+        return len(stale)
+
     # ---------- ciclo ----------
     async def _loop(self) -> None:
+        last_reap = 0.0
         while True:
             try:
                 await self.tick()
+                if time.monotonic() - last_reap > 300:  # cada 5 minutos
+                    last_reap = time.monotonic()
+                    await self.reap()
             except Exception:  # noqa: BLE001
                 log.exception("outbound_tick_failed")
                 ERRORS.labels("outbound_tick").inc()

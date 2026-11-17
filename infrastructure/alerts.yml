@@ -36,3 +36,38 @@ groups:
         for: 10m
         labels: { severity: warning }
         annotations: { summary: "Se rechazan sesiones por tope de concurrencia o presupuesto diario" }
+      - alert: ProveedorDeTelefoniaFallando
+        expr: sum(rate(omnivoice_errors_total{kind=~"telephony_outbound|telephony_transfer|telephony_hangup|provider_connect"}[5m])) > 0.05
+        for: 5m
+        labels: { severity: critical }
+        annotations: { summary: "Fallan las órdenes al proveedor telefónico (marcar, transferir o colgar): clave, saldo o caída del proveedor", runbook: "docs/TELEPHONY_INTEGRATION.md" }
+      - alert: FirmasDeTelefoniaInvalidas
+        expr: rate(omnivoice_errors_total{kind="telephony_bad_signature"}[5m]) > 0.5
+        for: 5m
+        labels: { severity: warning }
+        annotations: { summary: "Muchos webhooks de telefonía con firma inválida: token mal configurado o intento de suplantación" }
+      - alert: LlamadasAbandonadas
+        expr: increase(omnivoice_calls_abandoned_total[30m]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Hay llamadas sin estado final que el vigilante cerró: el proveedor dejó de avisar (¿Status Callback sin configurar?) o una réplica cayó" }
+      - alert: MarcacionesSalientesFallidas
+        expr: rate(omnivoice_outbound_jobs_total{event="dial_failed"}[10m]) > 0
+        for: 10m
+        labels: { severity: warning }
+        annotations: { summary: "El proveedor rechaza llamadas salientes" }
+      - alert: WebhooksSinEntregar
+        expr: rate(omnivoice_webhook_deliveries_total{outcome="failed"}[15m]) > 0
+        for: 15m
+        labels: { severity: warning }
+        annotations: { summary: "Entregas de webhooks agotadas: algún receptor de clientes no responde" }
+      - alert: WebhookDesactivadoAutomaticamente
+        expr: increase(omnivoice_webhook_deliveries_total{outcome="endpoint_disabled"}[1h]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Un webhook se desactivó tras fallos sostenidos: avisa al cliente" }
+      - alert: DestinoDeTransferenciaBloqueado
+        expr: increase(omnivoice_errors_total{kind="transfer_destination_blocked"}[1h]) > 0
+        for: 0m
+        labels: { severity: warning }
+        annotations: { summary: "Se bloqueó una transferencia por destino no permitido: revisar números de operador y TRANSFER_ALLOWED_PREFIXES" }

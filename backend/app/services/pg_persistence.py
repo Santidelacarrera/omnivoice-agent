@@ -260,6 +260,13 @@ class PostgresPersistence:
                                  {"i": phone_id, "o": org_id})).first()
         return {"id": str(r[0]), "e164": r[1], "agent_id": str(r[2]) if r[2] else None, "transfer_number": r[3]}
 
+    async def find_stale_calls(self, now, pre_answer_s, live_s, limit=100):
+        """Búsqueda global (todas las organizaciones) vía la función SECURITY DEFINER de la migración 014."""
+        async with get_engine().connect() as c:
+            rows = (await c.execute(text("SELECT org_id, provider, sid, status FROM find_stale_calls(:n, :p, :l, :m)"),
+                                    {"n": now, "p": pre_answer_s, "l": live_s, "m": limit})).all()
+        return [{"org_id": str(r[0]), "provider": r[1], "sid": r[2], "status": r[3]} for r in rows]
+
     async def get_call_by_sid(self, org_id, provider, sid):
         async with org_transaction(org_id) as c:
             r = (await c.execute(text("SELECT * FROM calls WHERE org_id = :o AND provider = :p AND provider_call_sid = :s"),

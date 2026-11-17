@@ -73,6 +73,7 @@ class Persistence(Protocol):
                                transfer_number: str | None = None) -> dict[str, Any]: ...
     async def update_phone_number(self, org_id: str, phone_id: str, changes: dict[str, Any]) -> dict[str, Any] | None: ...
     async def get_call_by_sid(self, org_id: str, provider: str, sid: str) -> dict[str, Any] | None: ...
+    async def find_stale_calls(self, now: datetime, pre_answer_s: int, live_s: int, limit: int = 100) -> list[dict[str, Any]]: ...
     async def delete_phone_number(self, org_id: str, phone_id: str) -> bool: ...
     async def resolve_phone_number(self, e164: str) -> dict[str, Any] | None: ...
     async def upsert_call(self, org_id: str, provider: str, sid: str, direction: str, agent_id: str | None,
@@ -277,6 +278,18 @@ class InMemoryPersistence:
             return None
         n.update(changes)
         return self._public_phone(n)
+
+    async def find_stale_calls(self, now, pre_answer_s, live_s, limit=100):
+        t = now.timestamp()
+        out = []
+        for c in self.calls.values():
+            if is_terminal(c["status"]):
+                continue
+            last = max((e["ts"] for e in self.call_events if e["call_id"] == c["id"]), default=c["created_at"])
+            limit_s = live_s if c["status"] in (ANSWERED, CONNECTED) else pre_answer_s
+            if t - last > limit_s:
+                out.append({"org_id": c["org_id"], "provider": c["provider"], "sid": c["sid"], "status": c["status"]})
+        return out[:limit]
 
     async def get_call_by_sid(self, org_id, provider, sid):
         c = next((c for c in self.calls.values() if c["org_id"] == org_id and c["provider"] == provider and c["sid"] == sid), None)
