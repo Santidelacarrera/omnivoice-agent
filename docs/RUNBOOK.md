@@ -109,3 +109,20 @@ Cada llamada es una fila en `calls` (única por proveedor + `CallSid`) con su hi
 ## Operador por línea y proveedor
 - Cada número puede tener su operador: `PATCH /api/v1/phone-numbers/{id}` con `{"transfer_number": "+56..."}` (`null` = usar `HUMAN_TRANSFER_NUMBER`). La transferencia usa el de la línea por la que entró o salió la llamada. **Quien tenga `phones:write` decide a qué número se desvían llamadas**: restringe ese permiso, porque un destino de tarificación especial sería un fraude de coste.
 - `TelephonyProvider` (`app/telephony/provider.py`) es el contrato de las órdenes al proveedor. Solo cubre el plano de control; la entrada (webhooks, TwiML, firma) sigue siendo de Twilio.
+## Resiliencia ante caídas
+- **Redis caído:** la API responde `503` con `Retry-After` (no 500), `/readyz` falla y `/healthz` sigue bien. Las llamadas en curso **continúan**: al cerrarlas, si no se puede liberar el cupo, queda como huérfano y caduca solo (hasta 2 h). Al volver Redis todo se recupera sin intervención.
+- **PostgreSQL caído o colgado:** la API de datos responde `503`. Una llamada de voz **no se rompe** (ADR-6): se pierde su historial, no la conversación. Cada conexión tiene plazo (`DB_CONNECT_TIMEOUT_S`, `DB_COMMAND_TIMEOUT_S`) y un cortacircuitos omite las escrituras de la llamada tras 3 fallos seguidos durante 15 s, para que una base que no responde no trabe el audio. Se cuenta en `omnivoice_errors_total{kind="persistence"|"persistence_skipped"}` (alerta `FalloDePersistencia`).
+- **Llamadas abandonadas:** cada 5 minutos un vigilante cierra como FAILED las que quedaron sin estado final (sin contestar más de 15 min, en curso más de 3 h; `CALL_STALE_PRE_ANSWER_S`, `CALL_STALE_LIVE_S`). Si aparecen, casi siempre falta el *Status Callback* en Twilio. Métrica `omnivoice_calls_abandoned_total`, alerta `LlamadasAbandonadas`.
+
+## Clientes, pedidos y SMS de confirmación
+- Herramientas: `lookup_customer`, `register_customer`, `check_order`, `send_confirmation`. Reconocen a quien llama **solo por su número (caller ID)**, que puede falsificarse: por eso solo entregan el nombre de pila y el estado de sus propios pedidos, nunca datos sensibles. Un pedido de otro número es indistinguible de uno inexistente.
+- Los pedidos los importa tu sistema con `PUT /api/v1/orders/{codigo}` (`{"phone", "status", "summary", "total", "eta_date"}`); solo se guarda la huella del número. `GET/DELETE /api/v1/customers` (owner/admin) para ver y suprimir clientes registrados.
+- `send_confirmation` envía un SMS (Twilio) **solo al número de quien llama**, desde la línea marcada, máximo 2 por llamada. El destino sale del contexto de la llamada, no de los argumentos del modelo, así que no puede redirigirse. El número completo vive en memoria durante la llamada (5 min en Redis al entrar), nunca en la base de datos.
+- `TRANSFER_ALLOWED_PREFIXES` (p. ej. `+56,+34`) y `TRANSFER_BLOCKED_PREFIXES` limitan a qué números se puede transferir (fraude por tarificación especial); se validan al guardar y al transferir.
+
+## Observabilidad
+- Prometheus con alertas (`infrastructure/alerts.yml`) y **Grafana con panel provisionado** (`infrastructure/grafana`): `docker compose up` lo carga solo en `localhost:3001`, carpeta *OmniVoice*.
+- **Sentry y OpenTelemetry (opcionales):** `pip install -r requirements-optional.txt` y define `SENTRY_DSN` y/o `OTEL_EXPORTER_OTLP_ENDPOINT`. Sentry se inicia sin datos personales y con un depurador que elimina credenciales, cuerpos, números y transcripciones. **No se han verificado contra un Sentry ni un colector reales**: pruébalos en staging antes de confiar en ellos.
+
+## Evaluaciones conversacionales
+`python -m evals.runner --offline` valida los casos con sus transcripciones de referencia (sin red). `ANTHROPIC_API_KEY=... python -m evals.runner --min-pass-rate 0.9` evalúa el modelo real (gasta tokens; también como workflow manual *Evaluaciones conversacionales*). Casos en `backend/evals/cases/`: fundamentar precios, no inventar, derivar consejos médicos, resistir inyección de prompt, exigir confirmación, transferir. Son heurísticas explicables: un fallo merece mirarse, un acierto no demuestra calidad.

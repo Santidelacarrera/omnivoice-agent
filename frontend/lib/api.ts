@@ -29,8 +29,10 @@ export async function api<T>(path: string, role: Role, init: RequestInit = {}): 
   });
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
+    if (r.status === 404 && body.detail === "Not Found") throw new Error("Esta función no está habilitada en el servidor (p. ej. la telefonía no está configurada).");
     throw new Error(typeof body.detail === "string" ? body.detail : `Error ${r.status}`);
   }
+  if (r.status === 204) return undefined as T; // DELETE correcto: sin cuerpo
   return r.json();
 }
 
@@ -66,6 +68,26 @@ export interface Analytics {
   rates: { answer_rate: number | null; missed_rate: number | null; transfer_rate: number | null };
   by_day: { date: string; calls: number; answered: number; missed: number; transferred: number }[];
 }
+
+export interface OutboundJob {
+  id: string; status: string; attempts: number; max_attempts: number; next_attempt_at: string; timezone: string; from_number: string;
+  consent_basis: string; to_masked: string | null; number_ref: string; last_result: string | null;
+}
+export interface DncEntry { id: string; number_ref: string; reason: string | null; created_at: number }
+export interface ApiKey { id: string; name: string; prefix: string; role: string; last_used_at: number | null; expires_at: number | null; revoked: boolean }
+export interface Webhook { id: string; url: string; events: string[]; description: string | null; active: boolean }
+export interface Delivery { id: number; event_type: string; status: string; attempts: number; last_status: number | null; last_error: string | null }
+export interface AuditEntry { ts: number; action: string; actor: string | null; detail: Record<string, unknown> }
+export interface SimResult {
+  sandbox: boolean; note: string; transcript: { role: "user" | "agent" | "system"; text: string }[];
+  tools: { tool: string; ok: boolean; error: string | null }[]; transferred: boolean;
+}
+
+export const CONSENT_LABELS: Record<string, string> = {
+  explicit_opt_in: "Consentimiento explícito (exige indicar cómo y cuándo)",
+  existing_customer: "Cliente existente",
+  transactional: "Comunicación transaccional",
+};
 
 export const pct = (v: number | null) => (v === null ? "—" : `${Math.round(v * 100)} %`);
 export const secs = (v: number | null) => (v === null ? "—" : v >= 60 ? `${Math.floor(v / 60)} min ${Math.round(v % 60)} s` : `${Math.round(v)} s`);

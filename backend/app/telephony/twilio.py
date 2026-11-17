@@ -71,5 +71,10 @@ class TwilioClient:
                                   auth=self._auth)
         r.raise_for_status()
 
+    async def send_sms(self, to: str, from_: str, body: str) -> dict[str, Any]:
+        r = await self._http.post(f"{self._base}/Messages.json", data={"To": to, "From": from_, "Body": body}, auth=self._auth)
+        r.raise_for_status()
+        return r.json()
+
     async def aclose(self) -> None:
         await self._http.aclose()

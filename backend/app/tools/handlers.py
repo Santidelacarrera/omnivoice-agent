@@ -1,18 +1,24 @@
 """Handlers de negocio. Acceden a datos mediante un repositorio inyectable (PostgreSQL en prod,
 en memoria en tests). Siempre filtran por org_id del principal (aislamiento multi-tenant)."""
+import time
 import uuid
 from typing import Any, Protocol
 
 from app.security.auth import Principal
+from app.tools.context import CALL_CONTEXT, caller_hash
 from app.tools.registry import (
     CancelReservationArgs,
     CheckInventoryArgs,
+    CheckOrderArgs,
     CheckReservationArgs,
     CreateReservationArgs,
     CreateTicketArgs,
     EndCallArgs,
     ModifyReservationArgs,
+    NoArgs,
+    RegisterCustomerArgs,
     SearchKbArgs,
+    SendConfirmationArgs,
     Tool,
     ToolRegistry,
     TransferArgs,
@@ -27,8 +33,15 @@ class Repository(Protocol):
     async def cancel_reservation(self, org_id: str, reservation_id: str) -> dict[str, Any] | None: ...
     async def create_ticket(self, org_id: str, data: dict[str, Any]) -> dict[str, Any]: ...
     async def search_kb(self, org_id: str, query: str) -> list[dict[str, Any]]: ...
+    async def find_customer(self, org_id: str, phone_hash: str) -> dict[str, Any] | None: ...
+    async def create_customer(self, org_id: str, phone_hash: str, first_name: str) -> dict[str, Any]: ...
+    async def list_customers(self, org_id: str) -> list[dict[str, Any]]: ...
+    async def delete_customer(self, org_id: str, customer_id: str) -> bool: ...
+    async def get_order(self, org_id: str, order_id: str) -> dict[str, Any] | None: ...
+    async def upsert_order(self, org_id: str, order_id: str, data: dict[str, Any]) -> dict[str, Any]: ...
 
 
+MAX_SMS_PER_CALL = 2
 DEMO_ORG = "00000000-0000-0000-0000-000000000001"  # misma organización que migrations/003_*.sql
 
 
@@ -37,6 +50,8 @@ class InMemoryRepository:
         self.stock = {(org, "chaqueta", "negro", "M"): {"units": 4, "price": 89.9} for org in ("o1", DEMO_ORG)}
         self.reservations: dict[tuple[str, str], dict[str, Any]] = {}
         self.tickets: list[dict[str, Any]] = []
+        self.customers: dict[tuple[str, str], dict[str, Any]] = {}
+        self.orders: dict[tuple[str, str], dict[str, Any]] = {}
 
     async def inventory(self, org_id, product, color, size):
         item = self.stock.get((org_id, product.lower(), (color or "").lower(), (size or "").upper()))
@@ -70,11 +85,40 @@ class InMemoryRepository:
         self.tickets.append({"org_id": org_id, **rec})
         return rec
 
+    async def find_customer(self, org_id, phone_hash):
+        c = self.customers.get((org_id, phone_hash))
+        return dict(c) if c else None
+
+    async def create_customer(self, org_id, phone_hash, first_name):
+        key = (org_id, phone_hash)
+        if key not in self.customers:
+            self.customers[key] = {"id": str(uuid.uuid4()), "first_name": first_name, "created_at": time.time()}
+        return dict(self.customers[key])
+
+    async def list_customers(self, org_id):
+        return [dict(c) for (o, _), c in self.customers.items() if o == org_id]
+
+    async def delete_customer(self, org_id, customer_id):
+        for key, c in list(self.customers.items()):
+            if key[0] == org_id and c["id"] == customer_id:
+                del self.customers[key]
+                return True
+        return False
+
+    async def get_order(self, org_id, order_id):
+        o = self.orders.get((org_id, order_id))
+        return dict(o) if o else None
+
+    async def upsert_order(self, org_id, order_id, data):
+        self.orders[(org_id, order_id)] = {"order_id": order_id, **data}
+        return dict(self.orders[(org_id, order_id)])
+
     async def search_kb(self, org_id, query):
         return [{"title": "Política de devoluciones", "snippet": "30 días con ticket."}]
 
 
-def build_registry(repo: Repository) -> ToolRegistry:
+def build_registry(repo: Repository, messenger: Any = None) -> ToolRegistry:
+    """`messenger`: función que devuelve el proveedor de mensajería (con `send_sms`) o None si no hay."""
     reg = ToolRegistry()
 
     async def check_inventory(a: CheckInventoryArgs, p: Principal):
@@ -112,6 +156,42 @@ def build_registry(repo: Repository) -> ToolRegistry:
         await repo.cancel_reservation(p.org_id, a.reservation_id)
         return {"cancelled": True, "already": False}
 
+    # ---- clientes, pedidos y confirmaciones: solo para quien llama, identificado por su número (caller ID) ----
+    async def lookup_customer(a: NoArgs, p: Principal):
+        """Reconoce a quien llama por su número. Devuelve lo mínimo (nombre de pila), nunca un registro completo."""
+        h = caller_hash(p.user_id)
+        if h is None:
+            return {"found": False, "reason": "llamante_no_identificado"}
+        c = await repo.find_customer(p.org_id, h)
+        return {"found": True, "first_name": c["first_name"]} if c else {"found": False}
+
+    async def register_customer(a: RegisterCustomerArgs, p: Principal):
+        h = caller_hash(p.user_id)
+        if h is None:
+            return {"registered": False, "reason": "llamante_no_identificado"}
+        c = await repo.create_customer(p.org_id, h, a.first_name.strip())  # idempotente por número
+        return {"registered": True, "first_name": c["first_name"]}
+
+    async def check_order(a: CheckOrderArgs, p: Principal):
+        """Solo devuelve pedidos de quien llama; un pedido ajeno es indistinguible de uno que no existe."""
+        h = caller_hash(p.user_id)
+        o = await repo.get_order(p.org_id, a.order_id) if h else None
+        if not o or o.get("phone_hash") != h:
+            return {"found": False}
+        return {"found": True, "status": o["status"], "summary": o["summary"], "total": o.get("total"), "eta_date": o.get("eta_date")}
+
+    async def send_confirmation(a: SendConfirmationArgs, p: Principal):
+        """SMS al número de quien llama, nunca a otro: el destino sale del contexto de la llamada, no de los argumentos del modelo."""
+        ctx = CALL_CONTEXT.get() or {}
+        provider = messenger() if callable(messenger) else messenger
+        if provider is None or not ctx.get("caller") or not ctx.get("our_number"):
+            return {"sent": False, "reason": "no_disponible"}
+        if ctx.get("sms_sent", 0) >= MAX_SMS_PER_CALL:
+            return {"sent": False, "reason": "limite_por_llamada"}
+        ctx["sms_sent"] = ctx.get("sms_sent", 0) + 1
+        await provider.send_sms(ctx["caller"], ctx["our_number"], a.message)
+        return {"sent": True}
+
     async def end_call(a: EndCallArgs, p: Principal):
         return {"ending": True, "reason": a.reason}
 
@@ -133,6 +213,13 @@ def build_registry(repo: Repository) -> ToolRegistry:
              ModifyReservationArgs, "session:create", modify_reservation, mutating=True, needs_confirmation=True),
         Tool("cancel_reservation", "Cancela una reserva existente (pide el nombre de la reserva).",
              CancelReservationArgs, "session:create", cancel_reservation, mutating=True, needs_confirmation=True),
+        Tool("lookup_customer", "Reconoce a quien llama por su número y devuelve su nombre de pila si ya es cliente.",
+             NoArgs, "session:create", lookup_customer),
+        Tool("register_customer", "Registra a quien llama como cliente con su nombre de pila (pide el nombre antes).",
+             RegisterCustomerArgs, "session:create", register_customer, mutating=True, needs_confirmation=True),
+        Tool("check_order", "Consulta el estado de un pedido de quien llama por su código.", CheckOrderArgs, "session:create", check_order),
+        Tool("send_confirmation", "Envía un SMS breve de confirmación al número de quien llama (máximo 2 por llamada).",
+             SendConfirmationArgs, "session:create", send_confirmation, mutating=True),
         Tool("end_call", "Finaliza la llamada cuando la conversación terminó y ya te despediste.",
              EndCallArgs, "session:create", end_call, mutating=True),
         Tool("create_support_ticket", "Abre un ticket de soporte.", CreateTicketArgs, "session:create", create_ticket, mutating=True),

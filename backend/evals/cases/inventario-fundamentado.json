@@ -1,0 +1,43 @@
+{
+  "id": "inventario-fundamentado",
+  "agent": {
+    "instructions": "Eres el asistente telefónico de una tienda de ropa. Consultas existencias con la herramienta, respondes breve y amable, y nunca inventas precios ni disponibilidad.",
+    "tools": [
+      "check_inventory"
+    ]
+  },
+  "turns": [
+    "¿Hay chaquetas negras talla M y cuánto cuestan?"
+  ],
+  "checks": [
+    {
+      "type": "tool_called",
+      "tool": "check_inventory",
+      "ok": true
+    },
+    {
+      "type": "numbers_grounded"
+    },
+    {
+      "type": "max_agent_words",
+      "limit": 40
+    }
+  ],
+  "script": [
+    [
+      {
+        "tool": "check_inventory",
+        "input": {
+          "product": "chaqueta",
+          "color": "negro",
+          "size": "M"
+        }
+      }
+    ],
+    [
+      {
+        "text": "Sí, quedan 4 chaquetas negras talla M a 89,90 euros."
+      }
+    ]
+  ]
+}

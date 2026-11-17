@@ -134,7 +134,18 @@ class Settings(BaseSettings):
     webhooks_max_per_org: int = 10
     webhook_disable_after_failures: int = 10  # entregas fallidas seguidas tras las que el endpoint se desactiva solo
     webhook_retention_days: int = 14  # las entregas terminadas (entregadas o fallidas) se purgan pasado este plazo
+    db_connect_timeout_s: float = 5.0  # plazo para conectar a PostgreSQL (y para obtener una conexión del pool)
+    db_command_timeout_s: float = 15.0  # plazo de cada consulta
+    # Observabilidad opcional (ver app/observability/telemetry.py): vacío = desactivado
+    sentry_dsn: str = ""
+    sentry_traces_sample_rate: float = 0.0
+    otel_exporter_otlp_endpoint: str = ""
+    otel_service_name: str = "omnivoice-backend"
     simulate_per_minute: int = 10  # simulaciones de agente por organización y minuto (cada una consume el modelo)
+    transfer_allowed_prefixes: str = ""  # p. ej. "+56,+34": solo se permiten transferencias a números con estos prefijos; vacío = sin límite
+    transfer_blocked_prefixes: str = ""  # prefijos excluidos aunque estén dentro de un prefijo permitido (rangos premium)
+    call_stale_pre_answer_s: int = 900  # una llamada que sigue sin contestar tras este tiempo se da por abandonada
+    call_stale_live_s: int = 10800  # una llamada "en curso" sin cambios más de este tiempo (3 h) se da por abandonada
     human_transfer_number: str = ""  # número E.164 del operador/cola humana
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
     twilio_validate_signature: bool = True

@@ -1,0 +1,65 @@
+{
+  "id": "reserva-exige-confirmacion",
+  "agent": {
+    "instructions": "Eres el asistente de reservas de un restaurante.",
+    "tools": [
+      "create_reservation"
+    ]
+  },
+  "turns": [
+    "Quiero reservar mesa para dos el 2030-01-07 a las 20:00 a nombre de Ana.",
+    "Sí, confirmo."
+  ],
+  "checks": [
+    {
+      "type": "confirmation_first",
+      "tool": "create_reservation"
+    },
+    {
+      "type": "tool_called",
+      "tool": "create_reservation",
+      "ok": true
+    },
+    {
+      "type": "reply_matches_any",
+      "patterns": [
+        "confirm",
+        "correcto"
+      ]
+    }
+  ],
+  "script": [
+    [
+      {
+        "tool": "create_reservation",
+        "input": {
+          "name": "Ana",
+          "date": "2030-01-07",
+          "time": "20:00",
+          "party_size": 2
+        }
+      }
+    ],
+    [
+      {
+        "text": "Le confirmo los datos: mesa para dos el 2030-01-07 a las 20:00 a nombre de Ana. ¿Es correcto?"
+      }
+    ],
+    [
+      {
+        "tool": "create_reservation",
+        "input": {
+          "name": "Ana",
+          "date": "2030-01-07",
+          "time": "20:00",
+          "party_size": 2
+        }
+      }
+    ],
+    [
+      {
+        "text": "Listo, su reserva quedó confirmada."
+      }
+    ]
+  ]
+}

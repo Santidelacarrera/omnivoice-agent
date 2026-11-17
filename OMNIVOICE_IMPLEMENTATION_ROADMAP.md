@@ -61,3 +61,15 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [ ] Carga y recuperación; staging/producción con aprobación; piloto con 3–5 clínicas.
 - [x] Documentos: API_DOCUMENTATION, DATABASE_SCHEMA, SECURITY, TESTING, TELEPHONY_INTEGRATION, AI_ORCHESTRATION, CONTRIBUTING, CHANGELOG.
 - [ ] Faltan: BILLING (no hay facturación todavía), TECHNICAL_SPECIFICATION y DEPLOYMENT dedicado (hoy en RUNBOOK y README).
+
+
+## ESTADO TRAS LA RONDA DE EXTRAS (2026-11-17)
+Hecho en esta ronda: SDK de Python y `POST /api/v1/calls`; destinos de transferencia permitidos; vigilante de llamadas abandonadas y alertas de proveedor; evaluaciones conversacionales (6 casos, workflow manual); herramientas de clientes, pedidos y SMS de confirmación (solo al número de quien llama); panel (asistente de 9 pasos, salientes y exclusión, claves, webhooks, auditoría); pruebas de interfaz con Playwright en CI; pruebas de recuperación y mejoras de resiliencia (503 limpio, plazos, cortacircuitos); umbrales de carga en CI; Grafana provisionado; Sentry y OpenTelemetry opcionales.
+
+**Sigue pendiente (y por qué):**
+- Integraciones Google Calendar, Outlook, HubSpot y Salesforce: requieren aplicaciones OAuth registradas y credenciales de cada proveedor; sin ellas no se pueden construir ni verificar.
+- Adaptador de entrada genérico (SIP u otro proveedor): hoy solo Twilio; hace falta un proveedor concreto con cuenta de pruebas.
+- Staging y producción separados, despliegue con aprobación, backups probados: infraestructura real.
+- Pantalla de Equipo en el panel: no hay API de usuarios (alta por CLI de operador); depende de la decisión de identidad.
+- Base de conocimiento con documentos y embeddings, facturación y planes, MFA: decisiones de producto.
+- Verificar con servicios reales: Twilio (llamadas y SMS), modelo de lenguaje (evaluaciones), Sentry y colector OpenTelemetry.

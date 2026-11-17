@@ -11,3 +11,5 @@ node_modules/
 .coverage
 coverage.xml
 htmlcov/
+frontend/test-results/
+frontend/playwright-report/

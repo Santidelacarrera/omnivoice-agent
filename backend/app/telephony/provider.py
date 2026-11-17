@@ -11,6 +11,12 @@ from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
+class MessagingProvider(Protocol):
+    async def send_sms(self, to: str, from_: str, body: str) -> dict[str, Any]:
+        """Envía un SMS. Devuelve al menos {"sid": ...}."""
+
+
+@runtime_checkable
 class TelephonyProvider(Protocol):
     async def create_call(self, to: str, from_: str, twiml_url: str, status_callback: str | None = None) -> dict[str, Any]:
         """Inicia una llamada saliente. Devuelve al menos {"sid": ..., "status": ...}."""

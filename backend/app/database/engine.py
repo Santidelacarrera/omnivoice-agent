@@ -14,9 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 _engine: AsyncEngine | None = None
 
 
-def init_engine(database_url: str) -> AsyncEngine:
+def init_engine(database_url: str, connect_timeout_s: float = 5.0, command_timeout_s: float = 15.0) -> AsyncEngine:
+    """Motor con plazos explícitos: sin ellos, una base de datos que no responde (paquetes descartados) bloquearía cada operación hasta 60 s."""
     global _engine
-    _engine = create_async_engine(database_url, pool_size=10, max_overflow=10, pool_pre_ping=True)
+    _engine = create_async_engine(database_url, pool_size=10, max_overflow=10, pool_pre_ping=True, pool_timeout=connect_timeout_s,
+                                  connect_args={"timeout": connect_timeout_s, "command_timeout": command_timeout_s})
     return _engine
 
 

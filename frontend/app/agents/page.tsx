@@ -1,4 +1,5 @@
 "use client";
+import Link from "next/link";
 import { FormEvent, useEffect, useState } from "react";
 import { Agent, api } from "@/lib/api";
 
@@ -28,7 +29,10 @@ export default function Agents() {
 
   return (
     <main className="mx-auto max-w-3xl space-y-6 p-6">
-      <h1 className="text-2xl font-semibold">Agentes</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold">Agentes</h1>
+        <Link href="/agents/new" className="rounded bg-slate-900 px-3 py-2 text-sm text-white">Asistente de creación</Link>
+      </div>
       {msg && <p role="status" className={`rounded p-3 text-sm ${msg.ok ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{msg.text}</p>}
       <form onSubmit={create} className="space-y-3 rounded border p-4">
         <label className="block text-sm">Nombre

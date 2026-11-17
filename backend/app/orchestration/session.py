@@ -27,6 +27,7 @@ from app.realtime.vad import create_vad
 from app.security.auth import Principal
 from app.services.persistence import InMemoryPersistence, Persistence
 from app.services.recordings import StereoRecorder, recording_key
+from app.tools.context import CALL_CONTEXT
 from app.tools.registry import ToolRegistry
 
 log = structlog.get_logger()
@@ -63,6 +64,7 @@ class VoiceSession:
         transfer_handler: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
         end_handler: Callable[[], Awaitable[None]] | None = None,
         webhooks: Any = None,
+        call_context: dict[str, Any] | None = None,
         provider_factory: Callable[[], RealtimeProvider] | None = None,
     ) -> None:
         self.id = uuid.uuid4().hex
@@ -80,6 +82,7 @@ class VoiceSession:
         self.recording_storage = recording_storage
         # Derivación efectiva a un humano (p. ej. telefonía). Sin handler, `transfer_to_human` solo deja constancia.
         self.transfer_handler = transfer_handler
+        self.call_context = call_context  # solo en memoria: número de quien llama y línea, para las herramientas
         self.webhooks = webhooks  # emite eventos a los webhooks de la organización (opcional)
         self.end_handler = end_handler  # cuelga/cierra cuando el agente usa `end_call` (telefonía)
         # Se graba solo con las tres condiciones: almacenamiento configurado, política de la organización y consentimiento.
@@ -466,9 +469,13 @@ class VoiceSession:
         self._set(State.TOOL_RUNNING)
         await self.send({"type": "tool.start", "name": ev["name"]})
         started = time.monotonic()
-        result = self._confirmation_gate(ev) or await self.registry.execute(
-            ev["name"], ev["arguments"], self.principal, ev["call_id"], self.allowed_tools
-        )
+        token = CALL_CONTEXT.set(self.call_context)
+        try:
+            result = self._confirmation_gate(ev) or await self.registry.execute(
+                ev["name"], ev["arguments"], self.principal, ev["call_id"], self.allowed_tools
+            )
+        finally:
+            CALL_CONTEXT.reset(token)
         duration_ms = round((time.monotonic() - started) * 1000)
         await self._audit("tool.executed", {"tool": ev["name"], "ok": result.get("ok"),
                                             "error": result.get("error"), "duration_ms": duration_ms})

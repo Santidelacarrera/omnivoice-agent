@@ -22,7 +22,7 @@ from app.security.auth import Principal, issue_token, require
 from app.services.persistence import ApiKeyPrefixTaken, InMemoryPersistence, Persistence, PhoneNumberTaken
 from app.services.recordings import RecordingStorage, build_storage
 from app.services.retention import InMemoryRetentionBackend, RetentionBackend, RetentionJob
-from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore
+from app.services.state_store import InMemoryStateStore, RedisStateStore, StateStore, release_quietly
 from app.tools.handlers import DEMO_ORG, InMemoryRepository, Repository, build_registry
 
 log = structlog.get_logger()
@@ -69,6 +69,15 @@ class PhoneNumberBody(BaseModel):
     e164: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$")
     agent_id: str | None = None
     transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
+
+
+class OrderBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    phone: str = Field(pattern=r"^\+[1-9][0-9]{6,14}$", description="Número del cliente; solo se guarda su huella")
+    status: str = Field(pattern=r"^(received|preparing|shipped|delivered|cancelled)$")
+    summary: str = Field(min_length=1, max_length=300)
+    total: float | None = Field(default=None, ge=0)
+    eta_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
 
 
 class CreateWebhookBody(BaseModel):
@@ -141,7 +150,10 @@ def create_app(
             from app.database.engine import init_engine
             from app.services.pg_persistence import PostgresPersistence
 
-            init_engine(s.database_url)
+            init_engine(s.database_url, s.db_connect_timeout_s, s.db_command_timeout_s)
+            from app.services.pg_persistence import BREAKER
+
+            BREAKER.success()  # cada arranque parte con el cortacircuitos cerrado
             app.state.db = PostgresPersistence()
             app.state.repo = repository or _postgres_repo()
         if store is None and s.state_backend == "redis":
@@ -190,13 +202,16 @@ def create_app(
     app.state.db = persistence or InMemoryPersistence()
     app.state.store = store or InMemoryStateStore()
     app.state.repo = repository or InMemoryRepository()
+    from app.observability.telemetry import setup_sentry, setup_tracing
     from app.security.netguard import system_resolver
     from app.services.webhooks import WebhookService
 
+    setup_sentry(s)
+    setup_tracing(app, s)
     app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
-    registry = build_registry(_RepoProxy(app))
+    registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
 
-    app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST"],
+    app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
                        allow_headers=["Authorization", "Content-Type"], allow_credentials=True)
 
     @app.middleware("http")
@@ -231,6 +246,21 @@ def create_app(
     @app.get("/healthz")
     async def healthz():
         return {"status": "ok"}
+
+    # Caída de una dependencia (Redis o PostgreSQL): 503 claro y contado, nunca un 500 con traza. Las llamadas en curso no pasan por aquí.
+    from redis.exceptions import RedisError
+    from sqlalchemy.exc import InterfaceError, OperationalError
+
+    async def _dependency_down(_request, exc):
+        from fastapi.responses import JSONResponse
+
+        ERRORS.labels("dependency_down").inc()
+        log.warning("dependency_down", error=type(exc).__name__)
+        return JSONResponse({"detail": "Servicio temporalmente no disponible; inténtalo de nuevo en unos segundos"}, status_code=503,
+                            headers={"Retry-After": "5"})
+
+    for exc_type in (RedisError, ConnectionError, TimeoutError, OperationalError, InterfaceError):
+        app.add_exception_handler(exc_type, _dependency_down)
 
     @app.get("/readyz")
     async def readyz():
@@ -468,6 +498,40 @@ def create_app(
     _status_route("publish", "published", "agent.published")
     _status_route("archive", "archived", "agent.archived")
 
+    # ---------- pedidos y clientes ----------
+    @app.put("/api/v1/orders/{order_id}")
+    async def put_order(order_id: str, body: OrderBody, p: Principal = Depends(authed("orders:write"))):
+        """Importa o actualiza un pedido desde el sistema de la empresa. El agente solo lo muestra a quien llama desde ese número."""
+        import datetime as _dt
+        import re as _re
+
+        from app.telephony.routes import caller_id_hash
+
+        if not _re.fullmatch(r"[A-Za-z0-9-]{4,30}", order_id):
+            raise HTTPException(422, "Código de pedido inválido")
+        if body.eta_date:
+            try:
+                _dt.date.fromisoformat(body.eta_date)
+            except ValueError:
+                raise HTTPException(422, "eta_date inválida") from None
+        data = {"phone_hash": caller_id_hash(body.phone), "status": body.status, "summary": body.summary, "total": body.total,
+                "eta_date": body.eta_date}
+        await app.state.repo.upsert_order(p.org_id, order_id, data)
+        await app.state.db.audit(p.org_id, p.user_id, "order.upserted", {"order_id": order_id, "status": body.status})
+        return {"order_id": order_id, "status": body.status, "summary": body.summary, "total": body.total, "eta_date": body.eta_date}
+
+    @app.get("/api/v1/customers")
+    async def list_customers(p: Principal = Depends(authed("customers:write"))):
+        return {"items": await app.state.repo.list_customers(p.org_id)}
+
+    @app.delete("/api/v1/customers/{customer_id}", status_code=204)
+    async def delete_customer(customer_id: str, p: Principal = Depends(authed("customers:write"))):
+        """Supresión de un cliente registrado por el agente (derecho de supresión)."""
+        if not await app.state.repo.delete_customer(p.org_id, _valid_id(customer_id)):
+            raise HTTPException(404, "Cliente no encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "customer.deleted", {"customer_id": customer_id})
+        return Response(status_code=204)
+
     # ---------- webhooks salientes ----------
     def _check_events(events: list[str]) -> list[str]:
         from app.services.webhooks import EVENT_TYPES
@@ -605,8 +669,16 @@ def create_app(
     async def list_phones(p: Principal = Depends(authed("phones:read"))):
         return {"items": await app.state.db.list_phone_numbers(p.org_id)}
 
+    def _check_transfer_target(number: str | None) -> None:
+        """Limita a qué números se puede desviar una llamada (fraude por números de tarificación especial)."""
+        from app.telephony.destinations import is_allowed, parse_prefixes
+
+        if number and not is_allowed(number, parse_prefixes(s.transfer_allowed_prefixes), parse_prefixes(s.transfer_blocked_prefixes)):
+            raise HTTPException(422, "Ese número de transferencia no está permitido en esta plataforma")
+
     @app.post("/api/v1/phone-numbers", status_code=201)
     async def add_phone(body: PhoneNumberBody, p: Principal = Depends(authed("phones:write"))):
+        _check_transfer_target(body.transfer_number)
         if body.agent_id is not None:
             await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
         try:
@@ -621,6 +693,7 @@ def create_app(
         changes = body.model_dump(exclude_unset=True)
         if not changes:
             raise HTTPException(422, "Sin cambios")
+        _check_transfer_target(changes.get("transfer_number"))
         if changes.get("agent_id"):
             await _agent_or_404(p.org_id, changes["agent_id"])
         phone = await app.state.db.update_phone_number(p.org_id, _valid_id(phone_id), changes)
@@ -742,7 +815,7 @@ def create_app(
                 await app.state.store.add_usage(principal.org_id, time.monotonic() - sess.metrics.started_at)
             except Exception:  # noqa: BLE001
                 log.exception("usage_accounting_failed", session=sess.id)
-            await app.state.store.release_session(principal.org_id, session_key)
+            await release_quietly(app.state.store, principal.org_id, session_key)
 
         session: VoiceSession | None = None
         loop = asyncio.get_running_loop()
@@ -798,7 +871,7 @@ def create_app(
                 except Exception:  # noqa: BLE001
                     log.exception("session_close_failed", session=session.id)
             else:
-                await app.state.store.release_session(principal.org_id, session_key)
+                await release_quietly(app.state.store, principal.org_id, session_key)
 
     from app.telephony.routes import register_telephony
 

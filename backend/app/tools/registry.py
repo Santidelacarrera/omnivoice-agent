@@ -84,6 +84,22 @@ class CancelReservationArgs(ToolArgs):
     name: str = Field(min_length=1, max_length=80, description="Nombre con el que se hizo la reserva (verificación de identidad)")
 
 
+class RegisterCustomerArgs(ToolArgs):
+    first_name: str = Field(min_length=1, max_length=80, description="Nombre de pila que dice la persona")
+
+
+class CheckOrderArgs(ToolArgs):
+    order_id: str = Field(pattern=r"^[A-Za-z0-9-]{4,30}$")
+
+
+class SendConfirmationArgs(ToolArgs):
+    message: str = Field(min_length=5, max_length=160, description="Texto breve del SMS de confirmación (sin datos sensibles)")
+
+
+class NoArgs(ToolArgs):
+    pass
+
+
 class EndCallArgs(ToolArgs):
     reason: str = Field(default="completada", min_length=2, max_length=120)
 
