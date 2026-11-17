@@ -10,7 +10,7 @@ webrtcvad-wheels>=2.0.12,<3
 pyjwt==2.15.0
 structlog==24.4.0
 prometheus-client==0.26.0
-boto3>=1.34,<2
+boto3>=1.44.3,<2
 httpx==0.28.1
 tzdata
 cryptography>=50,<51
