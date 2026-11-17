@@ -132,7 +132,12 @@ def create_app(
                                              s.retention_interval_seconds, s.retention_batch_size)
                 app.state.retention = retention_job
                 retention_job.start()
+        dialer = getattr(app.state, "dialer", None)
+        if dialer and s.outbound_scheduler_enabled:
+            dialer.start()
         yield
+        if dialer:
+            await dialer.stop()
         if retention_job:
             await retention_job.stop()
         # Cierre ordenado: finaliza sesiones vivas para no perder conversaciones ni consumo.

@@ -63,7 +63,8 @@ def test_twiml_is_escaped():
 class FakeTwilio:
     def __init__(self): self.calls, self.redirects, self.hangups = [], [], []
     async def create_call(self, to, from_, url, status_callback=None):
-        self.calls.append((to, from_, url)); return {"sid": "CAout", "status": "queued"}
+        self.calls.append((to, from_, url))
+        return {"sid": "CAout" if len(self.calls) == 1 else f"CAout{len(self.calls)}", "status": "queued"}
     async def redirect_call(self, sid, twiml): self.redirects.append((sid, twiml))
     async def hangup(self, sid, cancel=False): self.hangups.append((sid, cancel))
 
@@ -72,7 +73,10 @@ def make(provider=None, **over):
     s = Settings(environment="development", persistence_backend="memory", state_backend="memory", openai_api_key="",
                  telephony_provider="twilio", twilio_account_sid="AC1", twilio_auth_token="tok", twilio_from_number="+34910000000",
                  telephony_public_url=PUBLIC, vad_backend="energy", retention_job_enabled=False,
-                 **{"human_transfer_number": "+34911111111", "transfer_announce_ms": 10, **over})
+                 **{"human_transfer_number": "+34911111111", "transfer_announce_ms": 10,
+                    # ventana abierta las 24 h: el reloj real no debe decidir si las pruebas pasan
+                    "outbound_window_start": "00:00", "outbound_window_end": "23:59", "outbound_days": "0,1,2,3,4,5,6",
+                    "outbound_scheduler_enabled": False, **over})
     tw = FakeTwilio()
     app = create_app(s, provider_factory=(lambda: provider) if provider else (lambda: FakeProvider()), twilio=tw)
     return TestClient(app), tw
@@ -120,7 +124,7 @@ def test_full_call_flow_audio_both_ways_and_ticket_single_use():
 
 def test_outbound_requires_role_and_e164():
     c, tw = make()
-    body = {"to": "+34622222222"}
+    body = {"to": "+34622222222", "consent_basis": "existing_customer"}
     cust = {"Authorization": "Bearer " + issue_token("u", DEMO_ORG, "customer")}
     adm = {"Authorization": "Bearer " + issue_token("a", DEMO_ORG, "admin")}
     assert c.post("/api/v1/telephony/calls", json=body, headers=cust).status_code == 403

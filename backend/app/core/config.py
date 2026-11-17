@@ -113,6 +113,16 @@ class Settings(BaseSettings):
     telephony_language: str = "es"
     # Número sin asignar en phone_numbers: True = usa TELEPHONY_ORG_ID/TELEPHONY_AGENT_ID (compatibilidad); False = se rechaza (multi-tenant estricto).
     telephony_allow_unmapped: bool = True
+    # Llamadas salientes: solo se marca dentro de esta ventana (hora local del destinatario); la API no puede ampliarla.
+    outbound_window_start: str = "09:00"
+    outbound_window_end: str = "20:00"
+    outbound_days: str = "0,1,2,3,4,5"  # 0 = lunes … 6 = domingo
+    outbound_timezone: str = "America/Santiago"  # por defecto si el trabajo no indica la del destinatario
+    outbound_max_attempts: int = 3
+    outbound_per_minute: int = 10  # llamadas nuevas por organización y minuto
+    outbound_poll_seconds: int = 15
+    outbound_stale_claim_seconds: int = 600  # un trabajo "marcando" más tiempo que esto se recupera (réplica caída)
+    outbound_scheduler_enabled: bool = True
     human_transfer_number: str = ""  # número E.164 del operador/cola humana
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
     twilio_validate_signature: bool = True

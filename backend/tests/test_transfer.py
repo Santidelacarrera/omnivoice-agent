@@ -150,7 +150,8 @@ def test_api_transfer_unavailable_without_operator_number_and_unknown_calls():
 
 def test_api_cannot_transfer_before_answer_but_can_cancel_outbound():
     c, tw = make()
-    assert c.post("/api/v1/telephony/calls", json={"to": "+34622222222"}, headers=h()).status_code == 202
+    setup(c)
+    assert c.post("/api/v1/telephony/calls", json={"to": "+34622222222", "consent_basis": "existing_customer"}, headers=h()).status_code == 202
     cid = c.get("/api/v1/calls", headers=h()).json()["items"][0]["id"]
     assert c.post(f"/api/v1/calls/{cid}/transfer", json={}, headers=h()).status_code == 409
     assert c.post(f"/api/v1/calls/{cid}/end", headers=h(ORG, "operator")).status_code == 202

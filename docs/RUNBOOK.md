@@ -94,3 +94,14 @@ Cada llamada es una fila en `calls` (única por proveedor + `CallSid`) con su hi
 - **Privacidad:** ese texto contiene datos personales, así que **no se guarda en PostgreSQL**: vive 5 minutos en Redis/memoria, un solo uso. En la base solo queda el evento `TRANSFERRED` con `{"source", "context"}`. Si el operador no contesta en 5 minutos o ya se leyó, la llamada se conecta sin briefing.
 - La llamada transferida queda en estado final `TRANSFERRED`; el `completed` posterior de Twilio no lo cambia.
 - Finalizar: `POST /api/v1/calls/{id}/end` (cuelga; si aún no se contestó, la cancela → `CANCELLED`).
+
+## Llamadas salientes
+`POST /api/v1/outbound-calls` (roles owner/admin/manager) crea un **trabajo**; el antiguo `POST /api/v1/telephony/calls` está obsoleto y aplica las mismas reglas.
+- **Consentimiento obligatorio:** `consent_basis` = `explicit_opt_in` (exige `consent_ref`: cómo y cuándo consintió) | `existing_customer` | `transactional`. Sin él, 422. La plataforma registra lo que declaras; **la validez legal de esa base es responsabilidad del cliente** y debe revisarse por país (Chile, RGPD, etc.).
+- **Horario:** solo se marca dentro de `OUTBOUND_WINDOW_START/END` y `OUTBOUND_DAYS`, en la zona horaria del destinatario (`timezone`, por defecto `OUTBOUND_TIMEZONE`). Fuera de ventana el trabajo se programa para el próximo inicio de ventana; la API no puede ampliarla.
+- **Reintentos:** tras ocupado, sin respuesta o fallo se reintenta (espera 15, 30, 45… min, tope 2 h) hasta `max_attempts` (por defecto 3) y queda `EXHAUSTED`. Una llamada atendida no se reintenta.
+- **Duplicados:** un número no puede tener dos trabajos activos (409, garantizado por índice único); `idempotency_key` repite la misma respuesta sin crear otro.
+- **Lista de exclusión:** `POST /api/v1/do-not-call {"number": ...}` cancela lo programado y bloquea nuevos trabajos (403). Solo se guarda la huella.
+- **Privacidad:** el número completo se guarda únicamente mientras el trabajo está activo; al terminar se borra y queda una huella con sal por organización. La API nunca devuelve el número completo (`to_masked`).
+- **Número de origen:** el de la organización (el primero con un agente publicado, o `from_number`). El agente que atiende al contestar es el de ese número.
+- **Planificador:** cada `OUTBOUND_POLL_SECONDS` toma los trabajos vencidos de forma atómica (varias réplicas no se pisan; uno abandonado "marcando" se recupera tras `OUTBOUND_STALE_CLAIM_SECONDS`). Métrica `omnivoice_outbound_jobs_total{event}`. Para que los reintentos se cierren hay que configurar el *Status Callback* (ver «Estados de llamada»); las salientes lo reciben automáticamente.

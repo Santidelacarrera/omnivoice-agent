@@ -5,6 +5,7 @@ import hashlib
 import json
 import time
 import uuid
+from datetime import datetime
 from typing import Any, Callable
 from urllib.parse import parse_qs
 from xml.sax.saxutils import escape
@@ -18,7 +19,9 @@ from app.observability.metrics import CALL_EVENTS, ERRORS
 from app.orchestration.session import SessionOptions, VoiceSession
 from app.security.auth import Principal
 from app.telephony import call_state as cs
+from app.telephony import outbound as ob
 from app.telephony.codec import platform_to_telephony, telephony_to_platform
+from app.telephony.dialer import Dialer, OutboundError, public_job
 from app.telephony.handoff import HANDOFF_TTL_S, build_briefing
 from app.telephony.twilio import TwilioClient, dial_twiml, hangup_twiml, stream_twiml, validate_signature
 
@@ -37,6 +40,19 @@ class TransferCallBody(BaseModel):
 class OutboundCallBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     to: str = Field(pattern=r"^\+[1-9]\d{6,14}$")  # E.164
+    consent_basis: str = Field(description="explicit_opt_in | existing_customer | transactional")
+    consent_ref: str | None = Field(default=None, max_length=300)
+    scheduled_at: datetime | None = None  # con zona horaria; vacío = ahora (si el horario lo permite)
+    timezone: str | None = Field(default=None, max_length=64)  # la del destinatario
+    max_attempts: int | None = Field(default=None, ge=1, le=10)
+    from_number: str | None = Field(default=None, pattern=r"^\+[1-9]\d{6,14}$")
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=80)
+
+
+class DncBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    number: str = Field(pattern=r"^\+[1-9]\d{6,14}$")
+    reason: str | None = Field(default=None, max_length=200)
 
 
 def caller_id_hash(number: str) -> str:
@@ -80,10 +96,20 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
         res = await app.state.db.apply_call_event(org, "twilio", sid, status, key, detail or {})
         if res:
             CALL_EVENTS.labels(status, "duplicate" if res["duplicate"] else "applied" if res["applied"] else "ignored").inc()
+            if res["applied"] and cs.is_terminal(res["status"]):
+                try:  # decide reintento / fin de un trabajo saliente; nunca rompe la llamada
+                    await dialer.on_call_finished(org, sid, res["status"])
+                except Exception:  # noqa: BLE001
+                    log.exception("outbound_result_failed")
+                    ERRORS.labels("outbound_result").inc()
         return res
 
     def public_url(path: str, query: str = "") -> str:
         return s.telephony_public_url.rstrip("/") + path + (f"?{query}" if query else "")
+
+    dialer = Dialer(s, lambda: app.state.db, lambda: app.state.store, client,
+                    public_url("/telephony/voice", "direction=outbound"), public_url("/telephony/status"), track)
+    app.state.dialer = dialer
 
     @app.post("/telephony/voice")
     async def inbound_voice(request: Request):
@@ -219,23 +245,81 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
         await app.state.db.audit(p.org_id, p.user_id, "call.end_requested", {"call_id": call_id, "source": "api"})
         return {"status": "ending"}
 
-    @app.post("/api/v1/telephony/calls", status_code=202)
-    async def outbound_call(body: OutboundCallBody, p: Principal = Depends(authed("telephony:call"))):
-        if not s.twilio_from_number:
-            raise HTTPException(503, "TWILIO_FROM_NUMBER no configurado")
+    def _id_or_404(value: str) -> str:
         try:
-            call = await client.create_call(body.to, s.twilio_from_number, public_url("/telephony/voice", "direction=outbound"),
-                                            public_url("/telephony/status"))
-        except Exception:  # noqa: BLE001
-            log.exception("outbound_call_failed")
-            ERRORS.labels("telephony_outbound").inc()
-            raise HTTPException(502, "El operador de telefonía rechazó la llamada")
-        if call.get("sid") and await app.state.db.upsert_call(p.org_id, "twilio", call["sid"], "outbound", None,
-                                                              s.twilio_from_number, caller_id_hash(body.to)):
-            await track(p.org_id, call["sid"], cs.QUEUED, "placed")
-        await app.state.db.audit(p.org_id, p.user_id, "telephony.call_placed",
-                                 {"call_sid": call.get("sid"), "to": caller_id_hash(body.to)})
-        return {"call_sid": call.get("sid"), "status": call.get("status")}
+            uuid.UUID(value)
+        except ValueError:
+            raise HTTPException(404, "No encontrado") from None
+        return value
+
+    def _outbound_error(exc: OutboundError):
+        return HTTPException(exc.status, exc.message)
+
+    @app.post("/api/v1/outbound-calls", status_code=202)
+    async def create_outbound(body: OutboundCallBody, p: Principal = Depends(authed("outbound:write"))):
+        """Programa una llamada saliente. Exige base de consentimiento, respeta la lista de exclusión, el horario y los duplicados."""
+        try:
+            res = await dialer.submit(p.org_id, p.user_id, to=body.to, consent_basis=body.consent_basis, consent_ref=body.consent_ref,
+                                      scheduled_at=body.scheduled_at, tz=body.timezone, max_attempts=body.max_attempts,
+                                      from_number=body.from_number, idempotency_key=body.idempotency_key)
+        except OutboundError as exc:
+            raise _outbound_error(exc) from None
+        job = res["job"]
+        if res["created"]:
+            await app.state.db.audit(p.org_id, p.user_id, "outbound.scheduled",
+                                     {"job_id": job["id"], "consent_basis": body.consent_basis, "number_ref": job["number_hash"][:10]})
+            if job["next_attempt_at"] <= datetime.now(job["next_attempt_at"].tzinfo) and await dialer.dial_now(p.org_id, job["id"]):
+                job = await app.state.db.get_outbound_job(p.org_id, job["id"]) or job  # marcó ya: devuelve el estado real
+        return {**public_job(job), "replayed": not res["created"]}
+
+    @app.get("/api/v1/outbound-calls")
+    async def list_outbound(limit: int = 50, p: Principal = Depends(authed("calls:read"))):
+        return {"items": [public_job(j) for j in await app.state.db.list_outbound_jobs(p.org_id, max(1, min(limit, 200)))]}
+
+    @app.get("/api/v1/outbound-calls/{job_id}")
+    async def get_outbound(job_id: str, p: Principal = Depends(authed("calls:read"))):
+        job = await app.state.db.get_outbound_job(p.org_id, _id_or_404(job_id))
+        if not job:
+            raise HTTPException(404, "Trabajo no encontrado")
+        return public_job(job)
+
+    @app.post("/api/v1/outbound-calls/{job_id}/cancel")
+    async def cancel_outbound(job_id: str, p: Principal = Depends(authed("outbound:write"))):
+        before = await app.state.db.get_outbound_job(p.org_id, _id_or_404(job_id))
+        if not before:
+            raise HTTPException(404, "Trabajo no encontrado")
+        if before["status"] == "CANCELLED":
+            return public_job(before)  # cancelar es idempotente: repetirlo no cambia nada ni se audita dos veces
+        job = await app.state.db.cancel_outbound_job(p.org_id, job_id)
+        if not job or job["status"] != "CANCELLED":
+            raise HTTPException(409, f"No se puede cancelar un trabajo en estado {before['status']} (si hay una llamada en curso, finalízala)")
+        await app.state.db.audit(p.org_id, p.user_id, "outbound.cancelled", {"job_id": job_id})
+        return public_job(job)
+
+    @app.post("/api/v1/do-not-call", status_code=201)
+    async def add_dnc(body: DncBody, p: Principal = Depends(authed("outbound:write"))):
+        """Excluye un número (se guarda solo su huella) y cancela lo programado para él."""
+        entry = await app.state.db.add_dnc(p.org_id, ob.number_hash(p.org_id, body.number), body.reason, p.user_id)
+        await app.state.db.audit(p.org_id, p.user_id, "dnc.added", {"id": entry["id"]})
+        return {"id": entry["id"], "number_ref": entry["number_hash"][:10], "reason": entry.get("reason"), "created": entry["created"]}
+
+    @app.get("/api/v1/do-not-call")
+    async def list_dnc(p: Principal = Depends(authed("calls:read"))):
+        return {"items": [{"id": d["id"], "number_ref": d["number_hash"][:10], "reason": d.get("reason"), "created_at": d["created_at"]}
+                          for d in await app.state.db.list_dnc(p.org_id)]}
+
+    @app.delete("/api/v1/do-not-call/{dnc_id}", status_code=204)
+    async def remove_dnc(dnc_id: str, p: Principal = Depends(authed("outbound:write"))):
+        if not await app.state.db.remove_dnc(p.org_id, _id_or_404(dnc_id)):
+            raise HTTPException(404, "No encontrado")
+        await app.state.db.audit(p.org_id, p.user_id, "dnc.removed", {"id": dnc_id})
+        return Response(status_code=204)
+
+    @app.post("/api/v1/telephony/calls", status_code=202, deprecated=True)
+    async def outbound_call(body: OutboundCallBody, p: Principal = Depends(authed("outbound:write"))):
+        """Obsoleto: use /api/v1/outbound-calls. Mismas reglas (consentimiento, horario, exclusión, duplicados)."""
+        res = await create_outbound(body, p)
+        return {**res, "call_sid": res.get("last_call_sid")}  # forma anterior de la respuesta
 
     @app.websocket("/ws/telephony")
     async def ws_telephony(ws: WebSocket):

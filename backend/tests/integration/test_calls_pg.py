@@ -46,13 +46,14 @@ def _settings():
     return Settings(environment="test", jwt_secret=get_settings().jwt_secret, persistence_backend="postgres", state_backend="redis",
                     database_url=PG_URL, redis_url=REDIS_URL, vad_backend="energy", retention_job_enabled=False,
                     telephony_provider="twilio", twilio_account_sid="AC1", twilio_auth_token="tok", twilio_from_number="+34910000000",
-                    telephony_public_url=PUBLIC)
+                    telephony_public_url=PUBLIC, outbound_window_start="00:00", outbound_window_end="23:59",
+                    outbound_days="0,1,2,3,4,5,6", outbound_scheduler_enabled=False)
 
 
 def test_outbound_call_status_flow_on_postgres():
     tw = FakeTwilio()
     with TestClient(create_app(_settings(), twilio=tw)) as c:
-        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": "+34622222222"}).status_code == 202
+        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": "+34622222222", "consent_basis": "existing_customer"}).status_code == 202
         sid = tw.calls[0] and None
         sid = [x for x in c.get("/api/v1/calls", headers=_h(DEMO)).json()["items"] if x["status"] == "QUEUED"][0]["sid"]
         assert tw.calls[0][3] == f"{PUBLIC}/telephony/status"
@@ -114,7 +115,7 @@ def test_transfer_with_context_on_postgres_and_redis():
     tw = FakeTwilio()
     s = _settings().model_copy(update={"human_transfer_number": "+34911111111", "transfer_announce_ms": 10})
     with TestClient(create_app(s, twilio=tw)) as c:
-        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": "+34633333333"}).status_code == 202
+        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": "+34633333333", "consent_basis": "existing_customer"}).status_code == 202
         items = c.get("/api/v1/calls", headers=_h(DEMO)).json()["items"]
         call = [i for i in items if i["status"] == "QUEUED"][0]
         assert c.post(f"/api/v1/calls/{call['id']}/transfer", headers=_h(DEMO), json={}).status_code == 409  # aún sin contestar

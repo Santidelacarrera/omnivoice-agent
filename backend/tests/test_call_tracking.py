@@ -134,7 +134,8 @@ def test_rejected_unpublished_agent_is_recorded_as_failed():
 # ---------- llamadas salientes ----------
 def test_outbound_call_tracks_ringing_to_no_answer():
     c, tw = make()
-    r = c.post("/api/v1/telephony/calls", json={"to": "+34622222222"}, headers=h())
+    published_number(c)
+    r = c.post("/api/v1/telephony/calls", json={"to": "+34622222222", "consent_basis": "existing_customer"}, headers=h())
     assert r.status_code == 202
     assert tw.calls[0][2].endswith("/telephony/voice?direction=outbound")
     call = only_call(c)
@@ -147,7 +148,8 @@ def test_outbound_call_tracks_ringing_to_no_answer():
 # ---------- consulta ----------
 def test_calls_api_permissions_and_isolation():
     c, _ = make()
-    c.post("/api/v1/telephony/calls", json={"to": "+34622222222"}, headers=h())
+    published_number(c)
+    c.post("/api/v1/telephony/calls", json={"to": "+34622222222", "consent_basis": "existing_customer"}, headers=h())
     cid = only_call(c)["id"]
     for role, code in (("viewer", 200), ("analyst", 200), ("operator", 200), ("customer", 403)):
         assert c.get("/api/v1/calls", headers=h(ORG, role)).status_code == code

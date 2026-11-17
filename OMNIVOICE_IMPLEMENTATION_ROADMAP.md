@@ -21,7 +21,8 @@ Base: `OMNIVOICE_TECHNICAL_AUDIT.md`. Regla: no reconstruir lo ✅; cada tarea s
 - [x] Tablas `calls`/`call_events` (migración 007, RLS, eventos solo-anexar), estados CREATED…TRANSFERRED con transiciones solo hacia adelante, idempotencia por `(proveedor, CallSid)` y por evento, `POST /telephony/status` firmado, `GET /api/v1/calls[/{id}]`, métrica `omnivoice_call_events_total`, rechazo de entregas duplicadas de una llamada ya atendida.
 - [ ] Pendiente: interfaz `TelephonyProvider` (abstracción multi-proveedor; hoy el código conoce Twilio) y configurar el Status Callback en el número para entrantes (Twilio solo lo envía si está configurado en la consola/número).
 - [x] Transferencia a humano con contexto (briefing de motivo + últimos intercambios dicho solo al operador vía `<Number url>`, de un solo uso, efímero: no se guarda en la BD) y `POST /api/v1/calls/{id}/transfer|end`.
-- [ ] Pendiente: llamadas salientes con horarios, reintentos y consentimiento; número de origen por organización; elegir operador/cola por organización (hoy `HUMAN_TRANSFER_NUMBER` global).
+- [x] Llamadas salientes controladas: trabajos (`outbound_jobs`, migración 008) con base de consentimiento obligatoria, ventana horaria en la zona del destinatario, reintentos con espera creciente, huella del número con sal por organización (el número se borra al terminar), duplicados imposibles (índice único + idempotencia), lista de exclusión (`do_not_call`, solo huellas), planificador atómico entre réplicas, número de origen por organización.
+- [ ] Pendiente: operador/cola de transferencia por organización (hoy `HUMAN_TRANSFER_NUMBER` global); campañas masivas y límites de coste por plan; interfaz `TelephonyProvider`; revisión legal por país del texto de consentimiento y horarios (los valores por defecto son un punto de partida, no asesoría legal).
 - [ ] Evaluar SIP directo (verificar condiciones del proveedor antes).
 
 ## ETAPA 4 — IA

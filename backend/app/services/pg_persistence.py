@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.database.engine import get_engine, org_transaction
 from app.observability.metrics import ERRORS
-from app.services.persistence import _VERSIONED, COST_PER_AUDIO_MINUTE_USD, PhoneNumberTaken
+from app.services.persistence import _VERSIONED, COST_PER_AUDIO_MINUTE_USD, OutboundRejected, PhoneNumberTaken
 from app.telephony.call_state import can_transition, is_terminal
 
 log = structlog.get_logger()
@@ -311,6 +311,156 @@ class PostgresPersistence:
             ev = (await c.execute(text("SELECT status, event_key, applied, detail, ts FROM call_events WHERE call_id = :i ORDER BY id"),
                                   {"i": call_id})).mappings().all()
         return {**self._call_row(r), "events": [{**e, "ts": e["ts"].timestamp()} for e in ev]}
+
+    # ---- llamadas salientes ----
+    _JOB_COLS = ("id, org_id, number_hash, to_number, from_number, timezone, consent_basis, consent_ref, idempotency_key, status, "
+                 "attempts, max_attempts, next_attempt_at, claimed_at, last_call_sid, last_result, created_by, created_at, finished_at")
+
+    @staticmethod
+    def _job(r):
+        def ts(v):
+            return v.timestamp() if v else None
+        return {"id": str(r["id"]), "org_id": str(r["org_id"]), "number_hash": r["number_hash"], "to_number": r["to_number"],
+                "from_number": r["from_number"], "timezone": r["timezone"], "consent_basis": r["consent_basis"],
+                "consent_ref": r["consent_ref"], "idempotency_key": r["idempotency_key"], "status": r["status"],
+                "attempts": r["attempts"], "max_attempts": r["max_attempts"], "next_attempt_at": r["next_attempt_at"],
+                "claimed_at": r["claimed_at"], "last_call_sid": r["last_call_sid"], "last_result": r["last_result"],
+                "created_by": r["created_by"], "created_at": ts(r["created_at"]), "finished_at": ts(r["finished_at"])}
+
+    async def create_outbound_job(self, org_id, **f):
+        try:
+            async with org_transaction(org_id) as c:
+                if (await c.execute(text("SELECT 1 FROM do_not_call WHERE org_id = :o AND number_hash = :h"),
+                                    {"o": org_id, "h": f["number_hash"]})).first():
+                    raise OutboundRejected("do_not_call")
+                key = f.get("idempotency_key")
+                if key:
+                    old = (await c.execute(text(f"SELECT {self._JOB_COLS} FROM outbound_jobs WHERE org_id = :o AND idempotency_key = :k"),  # noqa: S608 - _JOB_COLS es una constante de la clase, sin entrada del usuario
+                                           {"o": org_id, "k": key})).mappings().first()
+                    if old:
+                        return {"job": self._job(old), "created": False}
+                row = (await c.execute(
+                    text("INSERT INTO outbound_jobs (org_id, number_hash, to_number, from_number, timezone, consent_basis, consent_ref, "  # noqa: S608 - _JOB_COLS es una constante de la clase, sin entrada del usuario
+                         "idempotency_key, max_attempts, next_attempt_at, created_by) VALUES (:o, :h, :t, :f, :tz, :cb, :cr, :k, :m, :n, :by) "
+                         f"RETURNING {self._JOB_COLS}"),
+                    {"o": org_id, "h": f["number_hash"], "t": f["to_number"], "f": f["from_number"], "tz": f["timezone"],
+                     "cb": f["consent_basis"], "cr": f.get("consent_ref"), "k": key, "m": f["max_attempts"],
+                     "n": f["next_attempt_at"], "by": f.get("created_by")})).mappings().first()
+                return {"job": self._job(row), "created": True}
+        except IntegrityError:
+            # Carrera: otro trabajo activo con el mismo número, o la misma clave de idempotencia insertada a la vez.
+            if f.get("idempotency_key"):
+                async with org_transaction(org_id) as c:
+                    old = (await c.execute(text(f"SELECT {self._JOB_COLS} FROM outbound_jobs WHERE org_id = :o AND idempotency_key = :k"),  # noqa: S608 - _JOB_COLS es una constante de la clase, sin entrada del usuario
+                                           {"o": org_id, "k": f["idempotency_key"]})).mappings().first()
+                if old:
+                    return {"job": self._job(old), "created": False}
+            raise OutboundRejected("duplicate_active") from None
+
+    async def get_outbound_job(self, org_id, job_id):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text(f"SELECT {self._JOB_COLS} FROM outbound_jobs WHERE id = :i AND org_id = :o"),  # noqa: S608 - _JOB_COLS es una constante de la clase, sin entrada del usuario
+                                 {"i": job_id, "o": org_id})).mappings().first()
+        return self._job(r) if r else None
+
+    async def list_outbound_jobs(self, org_id, limit=50):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text(f"SELECT {self._JOB_COLS} FROM outbound_jobs WHERE org_id = :o ORDER BY created_at DESC LIMIT :l"),  # noqa: S608 - _JOB_COLS es una constante de la clase, sin entrada del usuario
+                                    {"o": org_id, "l": limit})).mappings().all()
+        return [self._job(r) for r in rows]
+
+    async def cancel_outbound_job(self, org_id, job_id):
+        async with org_transaction(org_id) as c:
+            await c.execute(text("UPDATE outbound_jobs SET status = 'CANCELLED', to_number = NULL, claimed_at = NULL, finished_at = now(), "
+                                 "last_result = 'cancelled_by_user' WHERE id = :i AND org_id = :o AND status = 'SCHEDULED'"),
+                            {"i": job_id, "o": org_id})
+        return await self.get_outbound_job(org_id, job_id)
+
+    async def claim_due_outbound_jobs(self, now, limit, stale_s):
+        async with get_engine().begin() as c:
+            rows = (await c.execute(text("SELECT * FROM claim_due_outbound_jobs(:n, :l, :s)"),
+                                    {"n": now, "l": limit, "s": stale_s})).mappings().all()
+        return [{"id": str(r["id"]), "org_id": str(r["org_id"]), "number_hash": r["number_hash"], "to_number": r["to_number"],
+                 "from_number": r["from_number"], "timezone": r["timezone"], "attempts": r["attempts"],
+                 "max_attempts": r["max_attempts"]} for r in rows]
+
+    async def claim_outbound_job(self, org_id, job_id, now):
+        """Toma solo este trabajo (el de la petición en curso), sin tocar los de otras organizaciones."""
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(
+                text("UPDATE outbound_jobs SET status = 'DIALING', claimed_at = :n WHERE id = :i AND org_id = :o AND status = 'SCHEDULED' "
+                     "AND next_attempt_at <= :n RETURNING id, org_id, to_number, from_number, timezone, attempts, max_attempts, number_hash"),
+                {"n": now, "i": job_id, "o": org_id})).mappings().first()
+        return ({"id": str(r["id"]), "org_id": str(r["org_id"]), "to_number": r["to_number"], "from_number": r["from_number"],
+                 "timezone": r["timezone"], "attempts": r["attempts"], "max_attempts": r["max_attempts"],
+                 "number_hash": r["number_hash"]} if r else None)
+
+    async def mark_outbound_dialed(self, org_id, job_id, call_sid):
+        async with org_transaction(org_id) as c:
+            await c.execute(text("UPDATE outbound_jobs SET attempts = attempts + 1, last_call_sid = :s WHERE id = :i AND org_id = :o"),
+                            {"s": call_sid, "i": job_id, "o": org_id})
+
+    async def reschedule_outbound_job(self, org_id, job_id, when):
+        async with org_transaction(org_id) as c:
+            await c.execute(text("UPDATE outbound_jobs SET status = 'SCHEDULED', next_attempt_at = :w, claimed_at = NULL "
+                                 "WHERE id = :i AND org_id = :o AND status = 'DIALING'"), {"w": when, "i": job_id, "o": org_id})
+
+    async def finish_outbound_attempt(self, org_id, *, call_status, now, retry_delay, call_sid=None, job_id=None):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(
+                text(f"SELECT {self._JOB_COLS} FROM outbound_jobs WHERE org_id = :o AND status = 'DIALING' AND "  # noqa: S608 - _JOB_COLS es una constante de la clase, sin entrada del usuario
+                     "((CAST(:s AS TEXT) IS NOT NULL AND last_call_sid = :s) OR (CAST(:j AS UUID) IS NOT NULL AND id = :j)) FOR UPDATE"),
+                {"o": org_id, "s": call_sid, "j": job_id})).mappings().first()
+            if r is None:
+                return None
+            attempts = r["attempts"] + (1 if job_id and not call_sid else 0)
+            if call_status in ("COMPLETED", "TRANSFERRED"):
+                final = "COMPLETED"
+            elif call_status == "CANCELLED":
+                final = "CANCELLED"
+            elif attempts >= r["max_attempts"]:
+                final = "EXHAUSTED"
+            else:
+                final = None
+            if final:
+                await c.execute(text("UPDATE outbound_jobs SET status = :st, attempts = :a, last_result = :lr, to_number = NULL, "
+                                     "claimed_at = NULL, finished_at = :n WHERE id = :i"),
+                                {"st": final, "a": attempts, "lr": call_status, "n": now, "i": r["id"]})
+            else:
+                await c.execute(text("UPDATE outbound_jobs SET status = 'SCHEDULED', attempts = :a, last_result = :lr, claimed_at = NULL, "
+                                     "next_attempt_at = :w WHERE id = :i"),
+                                {"a": attempts, "lr": call_status, "w": now + retry_delay(attempts), "i": r["id"]})
+        return await self.get_outbound_job(org_id, str(r["id"]))
+
+    async def add_dnc(self, org_id, number_hash, reason, by):
+        async with org_transaction(org_id) as c:
+            row = (await c.execute(text("INSERT INTO do_not_call (org_id, number_hash, reason, added_by) VALUES (:o, :h, :r, :b) "
+                                        "ON CONFLICT (org_id, number_hash) DO NOTHING RETURNING id, created_at"),
+                                   {"o": org_id, "h": number_hash, "r": reason, "b": by})).first()
+            created = row is not None
+            if row is None:
+                row = (await c.execute(text("SELECT id, created_at FROM do_not_call WHERE org_id = :o AND number_hash = :h"),
+                                       {"o": org_id, "h": number_hash})).first()
+            # Una exclusión nueva cancela lo que estuviera programado para ese número.
+            await c.execute(text("UPDATE outbound_jobs SET status = 'CANCELLED', to_number = NULL, claimed_at = NULL, finished_at = now(), "
+                                 "last_result = 'do_not_call' WHERE org_id = :o AND number_hash = :h AND status = 'SCHEDULED'"),
+                            {"o": org_id, "h": number_hash})
+        return {"id": str(row[0]), "number_hash": number_hash, "reason": reason, "created_at": row[1].timestamp(), "created": created}
+
+    async def is_do_not_call(self, org_id, number_hash):
+        async with org_transaction(org_id) as c:
+            return (await c.execute(text("SELECT 1 FROM do_not_call WHERE org_id = :o AND number_hash = :h"),
+                                    {"o": org_id, "h": number_hash})).first() is not None
+
+    async def list_dnc(self, org_id):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT id, number_hash, reason, created_at FROM do_not_call WHERE org_id = :o ORDER BY created_at DESC"),
+                                    {"o": org_id})).all()
+        return [{"id": str(r[0]), "number_hash": r[1], "reason": r[2], "created_at": r[3].timestamp()} for r in rows]
+
+    async def remove_dnc(self, org_id, dnc_id):
+        async with org_transaction(org_id) as c:
+            return bool((await c.execute(text("DELETE FROM do_not_call WHERE id = :i AND org_id = :o"), {"i": dnc_id, "o": org_id})).rowcount)
 
     async def resolve_phone_number(self, e164):
         """Búsqueda global por número vía la función SECURITY DEFINER de la migración 006 (no hay org todavía)."""
