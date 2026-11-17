@@ -39,3 +39,10 @@ Un módulo no se da por terminado por existir su código: lleva pruebas unitaria
 
 ## Estado actual
 364 pruebas con PostgreSQL y Redis reales, cobertura combinada 88 %. Falta: pruebas de carga con umbral en CI, pruebas de recuperación (caída de Redis/PostgreSQL a mitad de llamada), pruebas de interfaz y pruebas con proveedores reales de telefonía.
+## Añadido después
+- **Interfaz (Playwright):** `cd frontend && npm run e2e`. Levanta un backend real en memoria y el frontend compilado, y recorre el asistente de 9 pasos, números, salientes, integraciones y auditoría. Estas pruebas encontraron dos fallos reales (el CORS bloqueaba PATCH, PUT y DELETE desde el navegador y el cliente fallaba con las respuestas 204). En CI corren en el job `frontend`.
+- **Recuperación:** `tests/test_recovery.py` simula la caída de Redis (un almacén que lanza el error real) y de PostgreSQL (puerto sin servidor) con llamadas en curso, y prueba el cortacircuitos.
+- **Carga:** el CI ejecuta `bench.orchestrator_bench --sessions 200` con umbrales (`--max-barge-p95-us 5000`, `--max-wall-seconds 60`). Son **holgados a propósito** (la medición local ronda 5 µs): detectan regresiones grandes, no microoptimizaciones. Mide solo nuestro código con proveedor simulado, no la latencia extremo a extremo.
+- **Evaluaciones conversacionales:** ver `docs/RUNBOOK.md`; `tests/test_evals.py` comprueba que cada comprobación detecta el fallo que dice detectar.
+- **SDK:** `tests/test_sdk.py` ejecuta el SDK de Python contra la API real en memoria.
+- **Playwright en local:** la primera vez `npx playwright install chromium` (descarga unos 90 MB).

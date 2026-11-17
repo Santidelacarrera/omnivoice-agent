@@ -14,12 +14,17 @@ Reglas: no se puede crear una clave con más permisos que los propios, nunca `ow
 | Llamadas | `GET /calls`, `GET /calls/{id}`, `POST /calls/{id}/transfer\|end` | `calls:read` / `telephony:call` |
 | Salientes | `POST/GET /outbound-calls`, `GET /outbound-calls/{id}`, `POST /outbound-calls/{id}/cancel`, `POST/GET /do-not-call`, `DELETE /do-not-call/{id}` | `outbound:write` / `calls:read` |
 | Conversaciones | `GET /conversations[/{id}]`, `DELETE /conversations/{id}`, `GET /conversations/{id}/recording` | `conversations:read\|delete`, `recordings:read` |
+| Pedidos y clientes | `PUT /orders/{id}`, `GET /customers`, `DELETE /customers/{id}` | `orders:write` (owner/admin/manager) / `customers:write` (owner/admin) |
+| Llamadas (alias) | `POST /api/v1/calls` equivale a `POST /outbound-calls` y añade `call_sid` | `outbound:write` |
 | Auditoría y métricas | `GET /audit-logs`, `GET /metrics` | `audit:read`, `metrics:read` |
 
 Detalle de reglas (consentimiento, horarios, confirmación de acciones, privacidad) en `docs/RUNBOOK.md` y `docs/AI_ORCHESTRATION.md`. La especificación OpenAPI completa está en `/docs` fuera de producción.
 
+## SDK
+Python en `sdk/python` (un archivo, depende solo de `httpx`; ver su README). Pendiente: SDK de JavaScript y publicación en PyPI y npm.
+
 ## Pendiente respecto al documento maestro
-`POST /api/v1/calls` (crear llamada: hoy es `POST /outbound-calls`), alertas de consumo por webhook y SDK.
+Alertas de consumo por webhook (necesitan cuotas por plan).
 
 ## Uso y analítica
 `GET /api/v1/usage?days=30` (minutos de audio, coste estimado de voz, llamadas y coste por llamada; **estimación, no factura**) y `GET /api/v1/analytics?days=30` (llamadas totales/entrantes/salientes, atendidas, perdidas, transferidas, duración media, tasas, serie por día y por agente). `days` entre 1 y 365. Permiso `metrics:read`; solo datos de tu organización y sin datos personales.

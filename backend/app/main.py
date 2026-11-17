@@ -202,9 +202,12 @@ def create_app(
     app.state.db = persistence or InMemoryPersistence()
     app.state.store = store or InMemoryStateStore()
     app.state.repo = repository or InMemoryRepository()
+    from app.observability.telemetry import setup_sentry, setup_tracing
     from app.security.netguard import system_resolver
     from app.services.webhooks import WebhookService
 
+    setup_sentry(s)
+    setup_tracing(app, s)
     app.state.webhooks = WebhookService(s, lambda: app.state.db, http=webhook_http, resolver=webhook_resolver or system_resolver)
     registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
 

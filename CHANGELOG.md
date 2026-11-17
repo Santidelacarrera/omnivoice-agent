@@ -13,11 +13,20 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). A
 - **Calidad:** cobertura con umbral del 80 % en CI; pruebas de integración contra PostgreSQL y Redis reales; documentación (`API_DOCUMENTATION`, `DATABASE_SCHEMA`, `SECURITY`, `TESTING`, `TELEPHONY_INTEGRATION`, `AI_ORCHESTRATION`, `CONTRIBUTING`) y auditoría técnica con roadmap.
 - Migraciones 005 a 013.
 
+- **Herramientas del agente:** reconocer a quien llama, registrar cliente, consultar pedidos y SMS de confirmación solo al número de quien llama (migración 015); API para importar pedidos y suprimir clientes.
+- **API y SDK:** `POST /api/v1/calls` y SDK de Python.
+- **Telefonía:** destinos de transferencia permitidos, vigilante de llamadas abandonadas (migración 014) y alertas del proveedor.
+- **Evaluaciones conversacionales** con 6 casos y workflow manual con el modelo real.
+- **Panel:** asistente de 9 pasos, salientes y exclusión, claves y webhooks, auditoría; **pruebas de interfaz con Playwright en CI**.
+- **Operación:** panel de Grafana provisionado; Sentry y OpenTelemetry opcionales (sin verificar contra servicios reales).
+- **Resiliencia:** 503 limpio si cae Redis o PostgreSQL, plazos de conexión, cortacircuitos de persistencia y umbrales de carga en CI.
+
 ### Cambiado (incompatible)
 - `POST /api/v1/telephony/calls` está **obsoleto**: exige `consent_basis`, solo lo usan owner/admin/manager y aplica las reglas de las salientes. Usa `POST /api/v1/outbound-calls`.
 - `create_reservation` ya no se ejecuta en la primera llamada del modelo: el servidor exige que el agente lea los datos y el usuario responda.
 - Las bases creadas por `initdb` necesitan `python -m app.migrate baseline --through 004` antes del primer `up`.
-- Dependencias nuevas: `tzdata`, `cryptography>=50`.
+- Dependencias nuevas: `tzdata`, `cryptography>=50` (opcionales en `requirements-optional.txt`: Sentry y OpenTelemetry).
+- CORS ahora permite `PATCH`, `PUT` y `DELETE` desde los orígenes configurados (antes solo GET y POST: el panel no podía editar ni borrar).
 
 ### Seguridad
 - `cryptography` 50 corrige PYSEC-2026-3552.
