@@ -181,3 +181,57 @@ test("conocimiento: sube un documento, lo encuentra con cita, lo reemplaza y lo 
   await page.getByRole("button", { name: "Eliminar" }).first().click();
   await expect(page.getByText("Aún no hay documentos.")).toBeVisible();
 });
+
+test("equipo: añade un miembro, cambia su rol, un admin no puede crear owners y se puede quitar", async ({ page }) => {
+  await page.goto("/team");
+  await expect(page.getByRole("heading", { name: "Equipo" })).toBeVisible();
+  const email = `e2e-${Date.now()}@example.com`;
+
+  await page.getByLabel("Email del miembro").fill(email);
+  await page.getByLabel("Rol", { exact: true }).selectOption("operator");
+  await page.getByRole("button", { name: "Añadir o actualizar" }).click();
+  await expect(page.getByRole("status")).toContainText(`${email}: rol operator`);
+  await expect(page.getByLabel(`Rol de ${email}`)).toHaveValue("operator");
+
+  await page.getByLabel(`Rol de ${email}`).selectOption("viewer");
+  await expect(page.getByRole("status")).toContainText("rol viewer");
+
+  // un admin no puede dar el rol owner: el servidor lo rechaza y el panel lo muestra
+  await page.getByLabel(`Rol de ${email}`).selectOption("owner");
+  await expect(page.locator("p[role=alert]")).toContainText("owner");
+  await expect(page.getByLabel(`Rol de ${email}`)).toHaveValue("viewer");
+
+  page.once("dialog", (d) => d.accept());
+  await page.locator("tr", { hasText: email }).getByRole("button", { name: "Quitar" }).click();
+  await expect(page.getByRole("status")).toContainText("eliminado");
+  await expect(page.locator("tr", { hasText: email })).toHaveCount(0);
+});
+
+test("conectores: crea uno sin mostrar la credencial, lo desactiva y lo elimina", async ({ page }) => {
+  await page.goto("/connectors");
+  const name = `crm-${Date.now().toString(36)}`;
+  await page.getByLabel("Nombre del conector").fill(name);
+  await page.getByLabel("URL base").fill("https://crm.example.com/api");
+  await page.getByLabel("Token", { exact: true }).fill("token-secreto-e2e");
+  await page.getByLabel("Rutas permitidas").fill("/orders, /customers");
+  await page.getByRole("button", { name: "Crear conector" }).click();
+  await expect(page.getByRole("status")).toContainText(`Conector «${name}» creado`);
+  const row = page.locator("tr", { hasText: name });
+  await expect(row).toContainText("credencial guardada");
+  await expect(row).toContainText("/orders, /customers");
+  await expect(page.locator("body")).not.toContainText("token-secreto-e2e");
+
+  await row.getByRole("button", { name: "Desactivar" }).click();
+  await expect(row).toContainText("(desactivado)");
+
+  page.once("dialog", (d) => d.accept());
+  await row.getByRole("button", { name: "Eliminar" }).click();
+  await expect(page.locator("tr", { hasText: name })).toHaveCount(0);
+
+  // una URL http se rechaza con un mensaje claro
+  await page.getByLabel("Nombre del conector").fill("inseguro");
+  await page.getByLabel("URL base").fill("http://crm.example.com");
+  await page.getByLabel("Token", { exact: true }).fill("x");
+  await page.getByRole("button", { name: "Crear conector" }).click();
+  await expect(page.locator("p[role=alert]")).toBeVisible();
+});

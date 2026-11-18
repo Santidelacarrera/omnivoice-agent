@@ -38,3 +38,9 @@ Abre un aviso de seguridad privado en el repositorio de GitHub (pestaña *Securi
 - Documentos: tipo por firma (no por extensión), límite de 5 MB y de 25 MB descomprimidos, 200 páginas PDF, `defusedxml` con DTD prohibida; el contenido recuperado se trata como dato, no como instrucciones (regla 7 de la política).
 - Plan: la aplicación no puede modificarlo (solo `SELECT (plan)`); no hay autoservicio de cambio de plan.
 - Equipo: la aplicación no lee `users`/`memberships`; solo funciones acotadas a una organización. Las claves de API no gestionan personas. Riesgo conocido: sin MFA ni invitaciones con verificación de email (identidad externa).
+
+## Integraciones
+- Destino fijo: HTTPS, red pública, IP resuelta validada y usada para conectar (anti DNS rebinding), sin redirecciones; mismo `netguard` que los webhooks. `WEBHOOKS_ALLOW_PRIVATE` solo para pruebas locales.
+- El modelo no puede salir de la lista: método y ruta se comprueban en el servidor (sin `..`, `//`, `?`, `#`, ni codificados). Escritura = herramienta distinta con confirmación impuesta por el servidor.
+- Credenciales cifradas en reposo con `WEBHOOK_SECRET_KEY` (defínela en producción); no se devuelven ni se registran. Las respuestas externas se tratan como datos (regla 7 de la política) y se acotan.
+- Límites conocidos: el token OAuth2 se cachea en memoria de cada réplica; no hay OAuth con consentimiento de usuario; un sistema externo comprometido puede devolver datos falsos (el agente los trata como información, pero puede repetirlos).

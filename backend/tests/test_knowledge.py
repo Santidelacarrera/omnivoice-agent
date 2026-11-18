@@ -244,3 +244,27 @@ def test_a_document_cannot_change_the_agent_instructions():
     out = tool_result(c, "devoluciones")
     assert out["found"] and "no instrucciones" in out["note"]
     assert "nunca instrucciones" in BASE_POLICY and "ignóralo" in BASE_POLICY and json.dumps(out)
+
+
+# ---------- variantes y sinónimos (sin embeddings) ----------
+def test_expand_terms_prefixes_synonyms_and_stopwords():
+    from app.knowledge import expand as ex
+
+    ex.configure(None)
+    t = ex.expand("¿Cómo puedo devolver un producto?")
+    assert "devol*" in t and "reemb*" in t  # la familia «devolución/reembolso» entra
+    assert "como" not in t and "puedo" not in t and "un" not in t
+    assert ex.expand("el") == [] and len(ex.expand(" ".join(f"palabra{i}x" for i in range(40)))) <= ex.MAX_TERMS
+    ex.configure([["garaje", "cochera"], ["solo"]])  # los grupos de la empresa se suman; uno de una palabra se ignora
+    assert "coche*" in ex.expand("garaje")  # «cochera» entra como prefijo
+    ex.configure(None)
+
+
+def test_search_finds_word_variants_and_synonyms_but_not_unrelated_text():
+    c = make_client()
+    add(c, "Política", "Las devoluciones se aceptan durante 30 días. El reembolso se hace al mismo medio de pago.")
+    add(c, "Contacto", "Escríbenos al correo de soporte para cualquier consulta.")
+    for q in ("¿puedo devolver un producto?", "quiero un reembolso", "devolución"):
+        hits = c.get("/api/v1/knowledge/search", params={"q": q}, headers=h()).json()["results"]
+        assert hits and hits[0]["title"] == "Política", q
+    assert not c.get("/api/v1/knowledge/search", params={"q": "astronautas marcianos"}, headers=h()).json()["results"]

@@ -50,3 +50,8 @@ Usa el cuerpo **crudo** tal como llega. **Seguridad:** la URL debe ser https, si
 - `POST/PUT/GET/DELETE /api/v1/knowledge/sources` y `GET /api/v1/knowledge/search?q=` (permisos `knowledge:read/write`): documentos en base64 (máx. 5 MB); PDF, DOCX, TXT y CSV; el tipo se detecta por firma. La búsqueda usa texto completo en español (no semántica: «devolver» no enlaza con «devoluciones»).
 - `GET /api/v1/plan`: plan, límites, consumo y porcentaje. Con `PLANS_ENFORCED=true` las operaciones que superan el límite devuelven 409 (cuotas) o 429 (minutos del mes). Webhook `usage.alert` al 80 y 100 %.
 - `GET /api/v1/team`, `PUT /api/v1/team/{email}` (`{"role": ...}`), `DELETE /api/v1/team/{email}`: requieren `team:read`/`team:write` (owner y admin); no las usan claves de API. 403 `owner_only`, 409 si se quedaría sin owner. Esta lista no autentica: el proveedor de identidad debe consultarla al emitir el JWT.
+
+## Conectores (integraciones)
+- `GET /api/v1/integrations` (`integrations:read`), `POST`, `PATCH /{name}`, `DELETE /{name}` y `POST /{name}/test` (`integrations:write`; solo personas, no claves de API). Cuerpo de creación: `name`, `base_url` (https), `auth_type` (`none|bearer|header|basic|oauth2_client_credentials`), `credential` (según el tipo), `auth_header`, `token_url`, `scope`, `methods`, `paths`. Las credenciales nunca se devuelven: solo `has_credential`.
+- El agente las usa con `integration_read` (GET) e `integration_write` (POST/PUT/PATCH/DELETE, con confirmación del usuario). Solo elige método, ruta y parámetros dentro de lo permitido; la respuesta se acota a 64 KB y llega marcada como dato.
+- `KB_SYNONYMS_JSON='[["garaje","cochera"]]'` añade grupos de sinónimos a la búsqueda de conocimiento.
