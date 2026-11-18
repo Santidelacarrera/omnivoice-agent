@@ -86,6 +86,12 @@ def test_validation_and_permissions():
         assert bad(credential={}).status_code == 422  # bearer sin token
         assert bad(auth_type="header", credential={"value": "x"}).status_code == 422  # falta el nombre de la cabecera
         assert bad(auth_type="oauth2_client_credentials", credential={"client_id": "a", "client_secret": "b"}).status_code == 422  # falta token_url
+        assert bad(auth_type="header", auth_header="X-Key\r\nInjected: 1", credential={"value": "x"}).status_code == 422  # inyección de cabeceras
+        assert bad(auth_type="header", auth_header="Bad Header!", credential={"value": "x"}).status_code == 422
+        assert bad(credential={"token": "abc\r\nX-Evil: 1"}).status_code == 422
+        assert bad(credential={"token": "x" * 2001}).status_code == 422
+        assert bad(scope="a\nb", auth_type="oauth2_client_credentials", token_url="https://x.example.com/t",
+                   credential={"client_id": "a", "client_secret": "b"}).status_code == 422
         assert c.post("/api/v1/integrations", json=BASE, headers=h("operator")).status_code == 403
         assert c.get("/api/v1/integrations", headers=h("viewer")).status_code == 403
 

@@ -32,6 +32,7 @@ log = structlog.get_logger()
 METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 AUTH_TYPES = ("none", "bearer", "header", "basic", "oauth2_client_credentials")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,39}$")
+HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,60}$")
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_BODY_BYTES = 8 * 1024
 MAX_INTEGRATIONS = 20
@@ -96,6 +97,10 @@ def validate_config(body: dict[str, Any], *, partial: bool = False) -> dict[str,
     for key in ("auth_header", "scope"):
         if key in body:
             out[key] = body[key] or None
+    if out.get("auth_header") and not HEADER_RE.match(out["auth_header"]):
+        raise IntegrationError("invalid_auth", "auth_header: solo letras, números y guion (máx. 60)")
+    if out.get("scope") and (len(out["scope"]) > 200 or any(ord(ch) < 32 for ch in out["scope"])):
+        raise IntegrationError("invalid_auth", "scope inválido")
     if "enabled" in body:
         out["enabled"] = bool(body["enabled"])
     return out
@@ -111,6 +116,8 @@ def build_credential(auth_type: str, cred: dict[str, Any] | None, auth_header: s
     missing = [k for k in needs if not cred.get(k)]
     if missing:
         raise IntegrationError("invalid_credential", f"Faltan credenciales: {', '.join(missing)}")
+    if any(len(str(cred[k])) > 2000 or any(ord(ch) < 32 or ord(ch) == 127 for ch in str(cred[k])) for k in needs):
+        raise IntegrationError("invalid_credential", "Las credenciales no pueden llevar saltos de línea ni caracteres de control (máx. 2000)")
     if auth_type == "header" and not auth_header:
         raise IntegrationError("invalid_auth", "auth_type header exige auth_header (nombre de la cabecera)")
     if auth_type == "oauth2_client_credentials" and not token_url:

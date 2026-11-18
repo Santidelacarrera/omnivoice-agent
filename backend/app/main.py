@@ -243,7 +243,9 @@ def create_app(
             await dispose_engine()
 
     app = FastAPI(title=s.app_name, version="1.0.0", lifespan=lifespan,
-                  docs_url=None if s.environment == "production" else "/docs")
+                  docs_url=None if s.environment == "production" else "/docs",
+                  redoc_url=None if s.environment == "production" else "/redoc",  # en producción no se publica el esquema de la API
+                  openapi_url=None if s.environment == "production" else "/openapi.json")
     app.state.db = persistence or InMemoryPersistence()
     app.state.store = store or InMemoryStateStore()
     app.state.repo = repository or InMemoryRepository()
@@ -575,6 +577,13 @@ def create_app(
     from app.services.integrations import MAX_INTEGRATIONS, IntegrationError, build_credential, validate_config
     from app.services.persistence import IntegrationNameTaken
 
+    def _integ_name(name: str) -> str:
+        from app.services.integrations import NAME_RE
+
+        if not NAME_RE.match(name):
+            raise HTTPException(404, "Integración no encontrada")  # un nombre con NUL u otros caracteres ni llega a la base de datos
+        return name
+
     def _integ_http(exc: IntegrationError) -> HTTPException:
         status = {"not_found": 404, "destination_not_allowed": 422, "auth_failed": 502, "timeout": 504, "connection_error": 502}.get(exc.code, 422)
         return HTTPException(status, exc.message)
@@ -608,6 +617,7 @@ def create_app(
     @app.patch("/api/v1/integrations/{name}")
     async def integrations_update(name: str, body: IntegrationPatch, p: Principal = Depends(authed("integrations:write"))):
         _humans_only(p)
+        name = _integ_name(name)
         current = await app.state.db.integration_get(p.org_id, name)
         if not current:
             raise HTTPException(404, "Integración no encontrada")
@@ -634,7 +644,7 @@ def create_app(
     @app.delete("/api/v1/integrations/{name}", status_code=204)
     async def integrations_delete(name: str, p: Principal = Depends(authed("integrations:write"))):
         _humans_only(p)
-        if not await app.state.db.integration_delete(p.org_id, name):
+        if not await app.state.db.integration_delete(p.org_id, _integ_name(name)):
             raise HTTPException(404, "Integración no encontrada")
         await app.state.db.audit(p.org_id, p.user_id, "integration.deleted", {"integration": name})
         return Response(status_code=204)
@@ -644,7 +654,7 @@ def create_app(
         """Hace una petición GET real (solo si el conector permite GET y la ruta) y devuelve el estado HTTP, sin el cuerpo."""
         _humans_only(p)
         try:
-            res = await app.state.integrations.call(p.org_id, name, "GET", body.path, actor=p.user_id)
+            res = await app.state.integrations.call(p.org_id, _integ_name(name), "GET", body.path, actor=p.user_id)
         except IntegrationError as exc:
             raise _integ_http(exc) from None
         return {"status": res["status"], "ok": res["ok"]}
@@ -655,6 +665,12 @@ def create_app(
                 "forbidden": HTTPException(403, "Permiso insuficiente"), "owner_only": HTTPException(403, "Solo un owner puede dar, quitar o cambiar el rol owner"),
                 "last_owner": HTTPException(409, "La organización no puede quedarse sin owner"),
                 "org_not_found": HTTPException(404, "Organización no encontrada")}.get(exc.code, HTTPException(400, "Operación no permitida"))
+
+    def _team_email(email: str) -> str:
+        email = email.strip()
+        if len(email) > 320 or any(ord(ch) < 32 or ord(ch) == 127 for ch in email):
+            raise HTTPException(422, "Email inválido")
+        return email
 
     @app.get("/api/v1/team")
     async def team_list(p: Principal = Depends(authed("team:read"))):
@@ -667,7 +683,7 @@ def create_app(
         from app.services.persistence import TeamError
 
         try:
-            res = await app.state.db.team_set(p.org_id, email.strip(), body.role, p.role)
+            res = await app.state.db.team_set(p.org_id, _team_email(email), body.role, p.role)
         except TeamError as exc:
             raise _team_http(exc) from None
         await app.state.db.audit(p.org_id, p.user_id, "team.member_set", {"user_id": res["user_id"], "role": body.role, "previous": res.get("previous")})
@@ -679,7 +695,7 @@ def create_app(
         from app.services.persistence import TeamError
 
         try:
-            removed = await app.state.db.team_remove(p.org_id, email.strip(), p.role)
+            removed = await app.state.db.team_remove(p.org_id, _team_email(email), p.role)
         except TeamError as exc:
             raise _team_http(exc) from None
         if not removed:
