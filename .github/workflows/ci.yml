@@ -98,12 +98,13 @@ jobs:
           grep -E '^(FAILED|ERROR)|^E ' /tmp/it.out | head -25 | while IFS= read -r l; do echo "::error::${l:0:400}"; done || true
           exit ${rc:-0}
   frontend:
+    timeout-minutes: 20  # un paso colgado (p. ej. playwright install) no debe bloquear el PR durante horas
     runs-on: ubuntu-24.04  # Playwright aún no admite las dependencias de ubuntu-latest (26.04)
     defaults: { run: { working-directory: frontend } }
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
-        with: { node-version: "22" }
+        with: { node-version: "26" }
       - run: node --test
         working-directory: sdk/js
       - run: npm ci
