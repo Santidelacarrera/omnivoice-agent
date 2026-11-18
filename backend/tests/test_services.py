@@ -65,9 +65,9 @@ def test_latency_window_nearest_rank():
 
 def test_production_config_rejects_insecure_values():
     base = dict(environment="production", persistence_backend="postgres", state_backend="redis",
-                jwt_secret="x" * 40, cors_origins=["https://app.example.com"])
+                jwt_secret="x" * 40, cors_origins=["https://app.example.com"], webhook_secret_key="k" * 40)
     Settings(**base)  # válida
-    for bad in (dict(jwt_secret="change-me"), dict(jwt_secret="corta"), dict(persistence_backend="memory"),
+    for bad in (dict(webhook_secret_key=""), dict(webhook_secret_key="corta"), dict(webhook_secret_key="x" * 40), dict(jwt_secret="change-me"), dict(jwt_secret="corta"), dict(persistence_backend="memory"),
                 dict(state_backend="memory"), dict(cors_origins=["*"])):
         with pytest.raises(ValueError):
             Settings(**{**base, **bad})

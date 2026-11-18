@@ -4,7 +4,7 @@
 1. Con el overlay de producción las migraciones y la clave de `omni_app` se aplican solas (ver README). Manual: aplica `migrations/*.sql` con un administrador y cambia la clave de `omni_app`.
    en `002_app_role.sql` (o créala fuera del script) y **no apliques el seed `003`** (datos demo).
 2. Variables obligatorias en producción: `ENVIRONMENT=production`, `PERSISTENCE_BACKEND=postgres`,
-   `STATE_BACKEND=redis`, `JWT_SECRET` (≥ 32 caracteres), `CORS_ORIGINS` explícito, `OPENAI_API_KEY`.
+   `STATE_BACKEND=redis`, `JWT_SECRET` (≥ 32 caracteres), `WEBHOOK_SECRET_KEY` (≥ 32 caracteres y distinta de `JWT_SECRET`; cifra secretos de webhooks y credenciales de conectores: guárdala igual que la base de datos, perderla deja esos secretos ilegibles), `CORS_ORIGINS` explícito, `OPENAI_API_KEY`.
    El proceso **se niega a arrancar** si alguna es insegura.
 3. Colocar un proxy TLS delante (WSS). Timeout de WS ≥ 65 s (el servidor cierra a los 60 s de inactividad).
 4. Probes: liveness `GET /healthz`, readiness `GET /readyz` (comprueba BD y Redis).
