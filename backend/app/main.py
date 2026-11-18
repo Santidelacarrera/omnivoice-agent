@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import re
 import struct
@@ -464,6 +465,21 @@ def create_app(
     async def list_agents(p: Principal = Depends(authed("agents:read"))):
         return {"items": await app.state.db.list_agents(p.org_id), "available_tools": [t["name"] for t in registry.schemas()]}
 
+    _plan_locks: dict[tuple[str, str], asyncio.Lock] = {}
+
+    def _org_lock(org_id: str, key: str) -> asyncio.Lock:
+        """Un cerrojo por (organización, recurso) para que «contar y crear» sea atómico dentro del proceso."""
+        return _plan_locks.setdefault((org_id, key), asyncio.Lock())
+
+    @contextlib.asynccontextmanager
+    async def _plan_slot(org_id: str, metric: str):
+        """Comprobar la cuota y crear forman una sola sección crítica por organización y métrica: sin ella, N peticiones simultáneas
+        pasan todas la comprobación y superan el límite. Es por proceso: con varias réplicas queda una ventana residual muy pequeña
+        (las cuotas son blandas; el consumo real se mide aparte)."""
+        async with _org_lock(org_id, metric):
+            await _plan_room(org_id, metric)
+            yield
+
     async def _plan_room(org_id: str, metric: str) -> None:
         try:
             await app.state.plans.ensure_room(org_id, metric)
@@ -478,8 +494,8 @@ def create_app(
     @app.post("/api/v1/agents", status_code=201)
     async def create_agent(body: CreateAgentBody, p: Principal = Depends(authed("agents:write"))):
         _check_tools(body.tools)
-        await _plan_room(p.org_id, "max_agents")
-        agent = await app.state.db.create_agent(p.org_id, body.name, body.instructions, body.tools, body.voice, body.language)
+        async with _plan_slot(p.org_id, "max_agents"):
+            agent = await app.state.db.create_agent(p.org_id, body.name, body.instructions, body.tools, body.voice, body.language)
         await app.state.db.audit(p.org_id, p.user_id, "agent.created", {"agent_id": agent["id"], "tools": body.tools})
         return agent
 
@@ -605,12 +621,13 @@ def create_app(
             raise HTTPException(422, getattr(exc, "message", str(exc))) from None
         except Exception as exc:  # noqa: BLE001 - netguard.UnsafeUrl
             raise HTTPException(422, str(exc)) from None
-        if len(await app.state.db.integration_list(p.org_id)) >= MAX_INTEGRATIONS:
-            raise HTTPException(409, f"Máximo {MAX_INTEGRATIONS} integraciones por organización")
-        try:
-            created = await app.state.db.integration_create(p.org_id, {**data, "credential_enc": svc.encrypt(cred)}, p.user_id)
-        except IntegrationNameTaken:
-            raise HTTPException(409, "Ya existe una integración con ese nombre") from None
+        async with _org_lock(p.org_id, "integrations"):
+            if len(await app.state.db.integration_list(p.org_id)) >= MAX_INTEGRATIONS:
+                raise HTTPException(409, f"Máximo {MAX_INTEGRATIONS} integraciones por organización")
+            try:
+                created = await app.state.db.integration_create(p.org_id, {**data, "credential_enc": svc.encrypt(cred)}, p.user_id)
+            except IntegrationNameTaken:
+                raise HTTPException(409, "Ya existe una integración con ese nombre") from None
         await app.state.db.audit(p.org_id, p.user_id, "integration.created", {"integration": body.name, "auth_type": data.get("auth_type", "none")})
         return created
 
@@ -733,12 +750,12 @@ def create_app(
     @app.post("/api/v1/knowledge/sources", status_code=201)
     async def kb_add(body: KnowledgeSourceBody, p: Principal = Depends(authed("knowledge:write"))):
         kind, checksum, size, chunks = _kb_prepare(body)
-        for existing in await app.state.repo.kb_list(p.org_id):
-            if existing["checksum"] == checksum:
-                raise HTTPException(409, f"Ese documento ya está cargado ({existing['name']}). Para actualizarlo usa PUT /knowledge/sources/{existing['id']}")
-        await _kb_check_quota(p.org_id, len(chunks))
-        await _plan_room(p.org_id, "max_kb_sources")
-        src = await app.state.repo.kb_create(p.org_id, body.name.strip(), kind, checksum, size, chunks, p.user_id)
+        async with _plan_slot(p.org_id, "max_kb_sources"):  # duplicado, cuotas y alta en una sola sección crítica
+            for existing in await app.state.repo.kb_list(p.org_id):
+                if existing["checksum"] == checksum:
+                    raise HTTPException(409, f"Ese documento ya está cargado ({existing['name']}). Para actualizarlo usa PUT /knowledge/sources/{existing['id']}")
+            await _kb_check_quota(p.org_id, len(chunks))
+            src = await app.state.repo.kb_create(p.org_id, body.name.strip(), kind, checksum, size, chunks, p.user_id)
         await app.state.db.audit(p.org_id, p.user_id, "knowledge.added", {"source_id": src["id"], "kind": kind, "chunks": len(chunks)})
         return src
 
@@ -837,12 +854,13 @@ def create_app(
         from app.services.webhooks import new_secret
 
         _humans_only(p)
-        if len(await app.state.db.list_webhooks(p.org_id)) >= s.webhooks_max_per_org:
-            raise HTTPException(409, f"Máximo {s.webhooks_max_per_org} webhooks por organización")
         url = await _checked_url(body.url)
         secret = new_secret()
-        hook = await app.state.db.create_webhook(p.org_id, url, app.state.webhooks.encrypt_secret(secret), _check_events(body.events),
-                                                 body.description, p.user_id)
+        async with _org_lock(p.org_id, "webhooks"):
+            if len(await app.state.db.list_webhooks(p.org_id)) >= s.webhooks_max_per_org:
+                raise HTTPException(409, f"Máximo {s.webhooks_max_per_org} webhooks por organización")
+            hook = await app.state.db.create_webhook(p.org_id, url, app.state.webhooks.encrypt_secret(secret), _check_events(body.events),
+                                                     body.description, p.user_id)
         await app.state.db.audit(p.org_id, p.user_id, "webhook.created", {"webhook_id": hook["id"], "events": hook["events"]})
         return {**hook, "secret": secret, "warning": "Guarda este secreto ahora: no se vuelve a mostrar."}
 
@@ -960,11 +978,11 @@ def create_app(
     @app.post("/api/v1/phone-numbers", status_code=201)
     async def add_phone(body: PhoneNumberBody, p: Principal = Depends(authed("phones:write"))):
         _check_transfer_target(body.transfer_number)
-        await _plan_room(p.org_id, "max_phone_numbers")
         if body.agent_id is not None:
             await _agent_or_404(p.org_id, body.agent_id)  # el agente debe ser de la misma organización
         try:
-            phone = await app.state.db.add_phone_number(p.org_id, body.e164, body.agent_id, body.transfer_number)
+            async with _plan_slot(p.org_id, "max_phone_numbers"):
+                phone = await app.state.db.add_phone_number(p.org_id, body.e164, body.agent_id, body.transfer_number)
         except PhoneNumberTaken:
             raise HTTPException(409, "Ese número ya está registrado") from None
         await app.state.db.audit(p.org_id, p.user_id, "phone.added", {"phone_id": phone["id"], "agent_id": body.agent_id})

@@ -7,7 +7,8 @@ from app.main import create_app
 
 def _client(env):
     extra = ({"persistence_backend": "postgres", "state_backend": "redis", "database_url": "postgresql+asyncpg://u:p@localhost:1/x",
-              "redis_url": "redis://localhost:1/0", "cors_origins": ["https://app.example.com"], "jwt_secret": "p" * 48}
+              "redis_url": "redis://localhost:1/0", "cors_origins": ["https://app.example.com"], "jwt_secret": "p" * 48,
+              "webhook_secret_key": "k" * 40}
              if env == "production" else {"jwt_secret": "t" * 40})
     return TestClient(create_app(Settings(environment=env, vad_backend="energy", **extra)))  # sin lifespan: solo se prueban las rutas
 

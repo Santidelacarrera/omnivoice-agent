@@ -178,6 +178,9 @@ class Settings(BaseSettings):
             problems = []
             if self.jwt_secret == "change-me" or len(self.jwt_secret) < 32:
                 problems.append("JWT_SECRET debe tener al menos 32 caracteres y no ser el valor por defecto")
+            if len(self.webhook_secret_key) < 32 or self.webhook_secret_key == self.jwt_secret:
+                problems.append("WEBHOOK_SECRET_KEY (>=32 caracteres, distinta de JWT_SECRET) es obligatoria: cifra los secretos de webhooks y las "
+                                "credenciales de conectores, y rotar JWT_SECRET no debe dejarlos ilegibles")
             if self.persistence_backend != "postgres":
                 problems.append("PERSISTENCE_BACKEND debe ser 'postgres'")
             if self.state_backend != "redis":

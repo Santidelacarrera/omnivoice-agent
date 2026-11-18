@@ -16,6 +16,7 @@ services:
       STATE_BACKEND: redis
       DATABASE_URL: postgresql+asyncpg://omni_app:${OMNI_APP_PASSWORD}@postgres:5432/omnivoice
       JWT_SECRET: ${JWT_SECRET:?define JWT_SECRET (>=32 caracteres)}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:?define WEBHOOK_SECRET_KEY (>=32 caracteres, distinta de JWT_SECRET)}
       CORS_ORIGINS: ${CORS_ORIGINS:?define CORS_ORIGINS, p. ej. ["https://app.ejemplo.com"]}
     read_only: true
     tmpfs: [/tmp]
