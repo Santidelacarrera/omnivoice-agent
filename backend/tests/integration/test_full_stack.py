@@ -3,6 +3,7 @@ import json
 import os
 import struct
 import time
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,7 +24,7 @@ pytestmark = pytest.mark.skipif(not (PG_URL and REDIS_URL), reason="requiere TES
 def _provider():
     return FakeProvider(audio_chunks=3, respond_on_audio=True, script=[
         {"type": "transcript_user", "text": "¿hay chaquetas negras talla M?"},
-        {"type": "tool_call", "call_id": "call-1", "name": "check_inventory",
+        {"type": "tool_call", "call_id": f"call-{uuid.uuid4().hex[:12]}", "name": "check_inventory",
          "arguments": json.dumps({"product": "chaqueta", "color": "negro", "size": "M"})},
     ])
 
@@ -39,6 +40,7 @@ def test_full_conversation_roundtrip_on_real_services():
     with TestClient(create_app(settings, provider_factory=_provider)) as c:
         assert c.get("/readyz").json()["status"] == "ready"
 
+        before = {i["id"] for i in c.get("/api/v1/conversations", headers=_headers()).json()["items"]}  # la prueba no depende de una base limpia
         sid = c.post("/api/v1/sessions", json={}, headers=_headers()).json()["session_id"]
         conn = c.post(f"/api/v1/sessions/{sid}/connect", headers=_headers()).json()
         with c.websocket_connect(conn["ws_path"]) as ws:
@@ -60,7 +62,7 @@ def test_full_conversation_roundtrip_on_real_services():
 
         items = []
         for _ in range(100):
-            items = c.get("/api/v1/conversations", headers=_headers()).json()["items"]
+            items = [i for i in c.get("/api/v1/conversations", headers=_headers()).json()["items"] if i["id"] not in before]
             if items:
                 break
             time.sleep(0.05)

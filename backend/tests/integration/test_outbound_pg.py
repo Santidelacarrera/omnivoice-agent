@@ -89,7 +89,8 @@ def test_job_lifecycle_duplicates_retries_and_number_erasure_on_postgres():
 
         # reintento: el planificador lo toma cuando vence
         assert c.portal.call(_tick, c, datetime.now(timezone.utc) + timedelta(minutes=16)) >= 1
-        sid2 = [x for x in c.get("/api/v1/calls", headers=_h(DEMO)).json()["items"] if x["sid"] != sid and x["status"] == "QUEUED"][0]["sid"]
+        sid2 = c.portal.call(_get, c, DEMO, job["id"])["last_call_sid"]  # la llamada de ESTE trabajo (no cualquiera en cola de la organización)
+        assert sid2 and sid2 != sid
         _status(c, sid2, "busy", "1")
         j = c.portal.call(_get, c, DEMO, job["id"])
         assert j["status"] == "EXHAUSTED" and j["attempts"] == 2 and j["to_number"] is None

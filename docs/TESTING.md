@@ -49,6 +49,6 @@ Un módulo no se da por terminado por existir su código: lleva pruebas unitaria
 - **Playwright en local:** la primera vez `npx playwright install chromium` (descarga unos 90 MB).
 
 ## Conocimiento, planes y equipo
-`tests/test_knowledge.py`, `test_plans.py`, `test_team.py` (memoria) y `tests/integration/test_*_pg.py` (PostgreSQL y Redis reales). Ejecuta las integraciones con `TEST_DATABASE_URL`, `TEST_ADMIN_DATABASE_URL` y `TEST_REDIS_URL` exportadas. `test_full_stack.py` exige una base limpia (`delete from tool_executions; delete from sessions;`). Última ejecución completa: 482 pasan, 89–90 % de cobertura.
+`tests/test_knowledge.py`, `test_plans.py`, `test_team.py` (memoria) y `tests/integration/test_*_pg.py` (PostgreSQL y Redis reales). Ejecuta las integraciones con `TEST_DATABASE_URL`, `TEST_ADMIN_DATABASE_URL` y `TEST_REDIS_URL` exportadas. `test_full_stack.py` ya no exige una base limpia (usa un `call_id` único por ejecución: la tabla `tool_executions` es única por `(org, call_id, herramienta)` y los proveedores reales emiten ids únicos). Última ejecución completa: 482 pasan, 89–90 % de cobertura.
 
 Conectores: `tests/test_integrations.py` (servidores simulados con `httpx.MockTransport`: IP fijada, rutas, OAuth2 con renovación, tamaño, redirecciones) y `tests/integration/test_integrations_pg.py`. **No** se ha probado contra Google, Outlook, HubSpot ni Salesforce.
