@@ -26,6 +26,10 @@ ACTIVE_JOB_STATES = ("SCHEDULED", "DIALING")
 MISSED_STATES = ("BUSY", "NO_ANSWER", "FAILED")  # sin atender: ocupado, no contestó o falló antes de conectar
 
 
+class IntegrationNameTaken(Exception):
+    """Ya existe una integración con ese nombre en la organización."""
+
+
 class TeamError(Exception):
     """Regla de equipo incumplida: invalid_role | invalid_email | forbidden | owner_only | last_owner | org_not_found."""
 
@@ -69,6 +73,11 @@ class Persistence(Protocol):
     async def call_analytics(self, org_id: str, since: datetime) -> dict[str, Any]: ...
     async def usage_since(self, org_id: str, since: datetime) -> dict[str, Any]: ...
     async def org_plan(self, org_id: str) -> str | None: ...
+    async def integration_create(self, org_id: str, data: dict[str, Any], created_by: str | None) -> dict[str, Any]: ...
+    async def integration_list(self, org_id: str) -> list[dict[str, Any]]: ...
+    async def integration_get(self, org_id: str, name: str) -> dict[str, Any] | None: ...
+    async def integration_update(self, org_id: str, name: str, changes: dict[str, Any]) -> dict[str, Any] | None: ...
+    async def integration_delete(self, org_id: str, name: str) -> bool: ...
     async def team_list(self, org_id: str) -> list[dict[str, Any]]: ...
     async def team_set(self, org_id: str, email: str, role: str, actor_role: str) -> dict[str, Any]: ...
     async def team_remove(self, org_id: str, email: str, actor_role: str) -> bool: ...
@@ -148,6 +157,7 @@ class InMemoryPersistence:
         self.jobs: dict[str, dict[str, Any]] = {}
         self.api_keys: dict[str, dict[str, Any]] = {}
         self.org_plans: dict[str, str] = {}
+        self.integrations: dict[str, dict[str, dict[str, Any]]] = {}  # org -> nombre -> fila (con credential_enc)
         self.team: dict[str, dict[str, dict[str, str]]] = {}  # org -> email -> {user_id, role}
         self.webhooks: dict[str, dict[str, Any]] = {}
         self.webhook_deliveries: list[dict[str, Any]] = []
@@ -201,6 +211,38 @@ class InMemoryPersistence:
     async def usage_summary(self, org_id):
         secs = sum(c.get("audio_seconds", 0) for c in self.convs.values() if c["org_id"] == org_id)
         return {"audio_seconds": secs, "estimated_cost_usd": round(secs / 60 * COST_PER_AUDIO_MINUTE_USD, 4)}
+
+    @staticmethod
+    def _public_integration(i: dict[str, Any]) -> dict[str, Any]:
+        """Nunca incluye la credencial, solo si existe."""
+        return {**{k: v for k, v in i.items() if k not in ("credential_enc", "org_id")}, "has_credential": bool(i.get("credential_enc"))}
+
+    async def integration_create(self, org_id, data, created_by):
+        rows = self.integrations.setdefault(org_id, {})
+        if data["name"] in rows:
+            raise IntegrationNameTaken(data["name"])
+        now = time.time()
+        rows[data["name"]] = {"id": str(uuid.uuid4()), "org_id": org_id, "enabled": True, "created_by": created_by, "created_at": now,
+                              "updated_at": now, "auth_header": None, "token_url": None, "scope": None, "credential_enc": None, **data}
+        return self._public_integration(rows[data["name"]])
+
+    async def integration_list(self, org_id):
+        return [self._public_integration(i) for _, i in sorted(self.integrations.get(org_id, {}).items())]
+
+    async def integration_get(self, org_id, name):
+        i = self.integrations.get(org_id, {}).get(name)
+        return dict(i) if i else None  # incluye credential_enc: solo para el servicio, nunca para la API
+
+    async def integration_update(self, org_id, name, changes):
+        i = self.integrations.get(org_id, {}).get(name)
+        if not i:
+            return None
+        i.update({k: v for k, v in changes.items() if k != "name"})
+        i["updated_at"] = time.time()
+        return self._public_integration(i)
+
+    async def integration_delete(self, org_id, name):
+        return self.integrations.get(org_id, {}).pop(name, None) is not None
 
     async def team_list(self, org_id):
         return [{"user_id": v["user_id"], "email": e, "role": v["role"]} for e, v in sorted(self.team.get(org_id, {}).items())]

@@ -15,6 +15,7 @@ from app.services.persistence import (
     _VERSIONED,
     COST_PER_AUDIO_MINUTE_USD,
     ApiKeyPrefixTaken,
+    IntegrationNameTaken,
     OutboundRejected,
     PhoneNumberTaken,
     TeamError,
@@ -693,6 +694,59 @@ class PostgresPersistence:
                 text("SELECT COALESCE(sum(audio_seconds),0) s, COALESCE(sum(estimated_cost_usd),0) c "
                      "FROM usage_records WHERE org_id = :o"), {"o": org_id})).first()
         return {"audio_seconds": float(r.s), "estimated_cost_usd": float(r.c)}
+
+    # ---- integraciones ----
+    _INTEG_COLS = ("id, name, base_url, auth_type, auth_header, token_url, scope, allowed_methods, allowed_paths, enabled, created_by, "
+                   "created_at, updated_at, (credential_enc IS NOT NULL) AS has_credential")
+
+    @staticmethod
+    def _integ(r):
+        return {"id": str(r.id), "name": r.name, "base_url": r.base_url, "auth_type": r.auth_type, "auth_header": r.auth_header,
+                "token_url": r.token_url, "scope": r.scope, "allowed_methods": list(r.allowed_methods), "allowed_paths": list(r.allowed_paths),
+                "enabled": r.enabled, "created_by": r.created_by, "created_at": r.created_at.timestamp(),
+                "updated_at": r.updated_at.timestamp(), "has_credential": r.has_credential}
+
+    async def integration_create(self, org_id, data, created_by):
+        try:
+            async with org_transaction(org_id) as c:
+                r = (await c.execute(
+                    text("INSERT INTO integrations (org_id, name, base_url, auth_type, auth_header, token_url, scope, credential_enc, "  # noqa: S608 - columnas constantes
+                         "allowed_methods, allowed_paths, created_by) VALUES (:o, :n, :u, :a, :ah, :tu, :sc, :ce, :m, :p, :by) "
+                         "RETURNING " + self._INTEG_COLS),  # noqa: S608 - columnas constantes
+                    {"o": org_id, "n": data["name"], "u": data["base_url"], "a": data.get("auth_type", "none"), "ah": data.get("auth_header"),
+                     "tu": data.get("token_url"), "sc": data.get("scope"), "ce": data.get("credential_enc"),
+                     "m": data.get("allowed_methods", ["GET"]), "p": data.get("allowed_paths", ["/"]), "by": created_by})).first()
+        except IntegrityError:
+            raise IntegrationNameTaken(data["name"]) from None
+        return self._integ(r)
+
+    async def integration_list(self, org_id):
+        async with org_transaction(org_id) as c:
+            rows = (await c.execute(text("SELECT " + self._INTEG_COLS + " FROM integrations WHERE org_id = :o ORDER BY name"),  # noqa: S608
+                                    {"o": org_id})).all()
+        return [self._integ(r) for r in rows]
+
+    async def integration_get(self, org_id, name):
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(text("SELECT " + self._INTEG_COLS + ", credential_enc, org_id FROM integrations WHERE org_id = :o AND name = :n"),  # noqa: S608
+                                 {"o": org_id, "n": name})).first()
+        return {**self._integ(r), "credential_enc": r.credential_enc, "org_id": str(r.org_id)} if r else None
+
+    async def integration_update(self, org_id, name, changes):
+        cols = {"base_url", "auth_type", "auth_header", "token_url", "scope", "credential_enc", "allowed_methods", "allowed_paths", "enabled"}
+        sets = [k for k in changes if k in cols]
+        if not sets:
+            return await self.integration_get(org_id, name)
+        async with org_transaction(org_id) as c:
+            r = (await c.execute(
+                text("UPDATE integrations SET " + ", ".join(f"{k} = :{k}" for k in sets) + ", updated_at = now() "  # noqa: S608 - nombres de columna de una lista fija
+                     "WHERE org_id = :o AND name = :n RETURNING " + self._INTEG_COLS),
+                {"o": org_id, "n": name, **{k: changes[k] for k in sets}})).first()
+        return self._integ(r) if r else None
+
+    async def integration_delete(self, org_id, name):
+        async with org_transaction(org_id) as c:
+            return bool((await c.execute(text("DELETE FROM integrations WHERE org_id = :o AND name = :n"), {"o": org_id, "n": name})).rowcount)
 
     # ---- equipo (funciones SECURITY DEFINER de la migración 018: las reglas viven en la base de datos) ----
     @staticmethod

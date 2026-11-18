@@ -5,6 +5,9 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). A
 ## [Sin publicar]
 
 ### Añadido
+- **Conectores / integraciones (migración 019):** conectores HTTP genéricos por organización con credenciales cifradas (bearer, cabecera, basic, OAuth2 client credentials con renovación), métodos y rutas acotados, protección SSRF y herramientas `integration_read` / `integration_write` (esta última exige confirmación). Página «Conectores». Sin verificar contra APIs de terceros reales; sin OAuth con consentimiento de usuario.
+- **Conocimiento:** la búsqueda coincide por familia léxica (prefijo) y sinónimos (de serie y `KB_SYNONYMS_JSON`), sin embeddings.
+- **Panel:** prueba e2e de Equipo y de Conectores.
 - **SDK de JavaScript** (`sdk/js`): agentes, llamadas, salientes, webhooks, equipo, plan y `verifyWebhook`; pruebas en CI.
 - **Conocimiento (migración 016):** documentos PDF/DOCX/TXT/CSV con extracción segura (tipo por firma, límites anti zip-bomb, XML sin DTD), fragmentos con fuente, versiones, cuotas y búsqueda en español; página «Conocimiento» y herramienta `search_knowledge_base` (el contenido es dato, nunca instrucciones).
 - **Planes y cuotas (migración 017):** planes definidos en código sin precios, cuotas opt-in (`PLANS_ENFORCED`), consumo mensual, bloqueo, webhook `usage.alert` al 80 y 100 %, `GET /api/v1/plan`, CLI `set-plan`; margen solo si se configura un precio.

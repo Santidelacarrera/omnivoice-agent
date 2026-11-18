@@ -18,6 +18,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
           <Link href="/knowledge">Conocimiento</Link>
           <Link href="/outbound">Salientes</Link>
           <Link href="/integrations">Integraciones</Link>
+          <Link href="/connectors">Conectores</Link>
           <Link href="/team">Equipo</Link>
           <Link href="/audit">Auditoría</Link>
           <Link href="/settings">Configuración</Link>

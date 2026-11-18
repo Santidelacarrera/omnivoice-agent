@@ -110,6 +110,17 @@ class CreateTicketArgs(ToolArgs):
     priority: str = Field(default="normal", pattern=r"^(low|normal|high)$")
 
 
+class IntegrationReadArgs(ToolArgs):
+    integration: str = Field(min_length=2, max_length=40, pattern=r"^[a-z0-9][a-z0-9_-]+$")
+    path: str = Field(min_length=1, max_length=300)
+    query: dict[str, str] = Field(default_factory=dict, max_length=10)
+
+
+class IntegrationWriteArgs(IntegrationReadArgs):
+    method: str = Field(pattern=r"^(POST|PUT|PATCH|DELETE)$")
+    body: dict[str, Any] = Field(default_factory=dict)
+
+
 class SearchKbArgs(ToolArgs):
     query: str = Field(min_length=2, max_length=200)
 

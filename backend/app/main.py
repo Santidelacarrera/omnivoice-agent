@@ -71,6 +71,37 @@ class PhoneNumberBody(BaseModel):
     transfer_number: str | None = Field(default=None, pattern=r"^\+[1-9][0-9]{6,14}$")  # operador de esta línea
 
 
+class IntegrationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+    base_url: str = Field(max_length=500)
+    auth_type: str = "none"
+    credential: dict[str, str] | None = None
+    auth_header: str | None = None
+    token_url: str | None = Field(default=None, max_length=500)
+    scope: str | None = Field(default=None, max_length=200)
+    methods: list[str] = Field(default_factory=lambda: ["GET"], max_length=5)
+    paths: list[str] = Field(default_factory=lambda: ["/"], max_length=20)
+
+
+class IntegrationPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_url: str | None = Field(default=None, max_length=500)
+    auth_type: str | None = None
+    credential: dict[str, str] | None = None
+    auth_header: str | None = None
+    token_url: str | None = Field(default=None, max_length=500)
+    scope: str | None = Field(default=None, max_length=200)
+    methods: list[str] | None = None
+    paths: list[str] | None = None
+    enabled: bool | None = None
+
+
+class IntegrationTestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = "/"
+
+
 class TeamRoleBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     role: str = Field(pattern=r"^(owner|admin|manager|operator|analyst|viewer)$")
@@ -148,6 +179,7 @@ def create_app(
     twilio: Any = None,
     simulator_llm: Any = None,
     webhook_http: Any = None,
+    integrations_http: Any = None,
     webhook_resolver: Any = None,
 ) -> FastAPI:
     s = settings or get_settings()
@@ -230,8 +262,11 @@ def create_app(
         _kb_expand.configure(json.loads(s.kb_synonyms_json) if s.kb_synonyms_json else None)
     except (ValueError, TypeError):
         raise RuntimeError("KB_SYNONYMS_JSON debe ser una lista de listas de palabras") from None
+    from app.services.integrations import IntegrationService
+
+    app.state.integrations = IntegrationService(s, lambda: app.state.db, http=integrations_http, resolver=webhook_resolver or system_resolver)
     app.state.plans = Plans(s, lambda: app.state.db, lambda: app.state.store, lambda: app.state.repo, lambda: app.state.webhooks)
-    registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None))
+    registry = build_registry(_RepoProxy(app), lambda: getattr(app.state, "messenger", None), lambda: getattr(app.state, "integrations", None))
 
     app.add_middleware(CORSMiddleware, allow_origins=s.cors_origins, allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
                        allow_headers=["Authorization", "Content-Type"], allow_credentials=True)
@@ -535,6 +570,84 @@ def create_app(
 
     _status_route("publish", "published", "agent.published")
     _status_route("archive", "archived", "agent.archived")
+
+    # ---------- integraciones ----------
+    from app.services.integrations import MAX_INTEGRATIONS, IntegrationError, build_credential, validate_config
+    from app.services.persistence import IntegrationNameTaken
+
+    def _integ_http(exc: IntegrationError) -> HTTPException:
+        status = {"not_found": 404, "destination_not_allowed": 422, "auth_failed": 502, "timeout": 504, "connection_error": 502}.get(exc.code, 422)
+        return HTTPException(status, exc.message)
+
+    @app.get("/api/v1/integrations")
+    async def integrations_list(p: Principal = Depends(authed("integrations:read"))):
+        """Conectores HTTP configurados. Nunca devuelve credenciales, solo si existen (`has_credential`)."""
+        return {"items": await app.state.db.integration_list(p.org_id), "auth_types": ["none", "bearer", "header", "basic", "oauth2_client_credentials"]}
+
+    @app.post("/api/v1/integrations", status_code=201)
+    async def integrations_create(body: IntegrationBody, p: Principal = Depends(authed("integrations:write"))):
+        _humans_only(p)
+        svc = app.state.integrations
+        try:
+            data = validate_config({"name": body.name, "base_url": body.base_url, "auth_type": body.auth_type, "auth_header": body.auth_header,
+                                    "token_url": body.token_url, "scope": body.scope, "methods": body.methods, "paths": body.paths})
+            cred = build_credential(data.get("auth_type", "none"), body.credential, data.get("auth_header"), data.get("token_url"))
+        except (IntegrationError, ValueError) as exc:
+            raise HTTPException(422, getattr(exc, "message", str(exc))) from None
+        except Exception as exc:  # noqa: BLE001 - netguard.UnsafeUrl
+            raise HTTPException(422, str(exc)) from None
+        if len(await app.state.db.integration_list(p.org_id)) >= MAX_INTEGRATIONS:
+            raise HTTPException(409, f"Máximo {MAX_INTEGRATIONS} integraciones por organización")
+        try:
+            created = await app.state.db.integration_create(p.org_id, {**data, "credential_enc": svc.encrypt(cred)}, p.user_id)
+        except IntegrationNameTaken:
+            raise HTTPException(409, "Ya existe una integración con ese nombre") from None
+        await app.state.db.audit(p.org_id, p.user_id, "integration.created", {"integration": body.name, "auth_type": data.get("auth_type", "none")})
+        return created
+
+    @app.patch("/api/v1/integrations/{name}")
+    async def integrations_update(name: str, body: IntegrationPatch, p: Principal = Depends(authed("integrations:write"))):
+        _humans_only(p)
+        current = await app.state.db.integration_get(p.org_id, name)
+        if not current:
+            raise HTTPException(404, "Integración no encontrada")
+        raw = body.model_dump(exclude_unset=True)
+        try:
+            data = validate_config({k: v for k, v in raw.items() if k != "credential"}, partial=True)
+            merged_type = data.get("auth_type", current["auth_type"])
+            if "credential" in raw or "auth_type" in data:
+                cred = build_credential(merged_type, raw.get("credential"), data.get("auth_header", current["auth_header"]),
+                                        data.get("token_url", current["token_url"]))
+                data["credential_enc"] = app.state.integrations.encrypt(cred)
+                app.state.integrations.invalidate_token(p.org_id, current["id"])
+        except IntegrationError as exc:
+            raise HTTPException(422, exc.message) from None
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(422, str(exc)) from None
+        if not data:
+            raise HTTPException(422, "Sin cambios")
+        updated = await app.state.db.integration_update(p.org_id, name, data)
+        await app.state.db.audit(p.org_id, p.user_id, "integration.updated", {"integration": name, "fields": sorted(k for k in data if k != "credential_enc")
+                                                                           + (["credential"] if "credential_enc" in data else [])})
+        return updated
+
+    @app.delete("/api/v1/integrations/{name}", status_code=204)
+    async def integrations_delete(name: str, p: Principal = Depends(authed("integrations:write"))):
+        _humans_only(p)
+        if not await app.state.db.integration_delete(p.org_id, name):
+            raise HTTPException(404, "Integración no encontrada")
+        await app.state.db.audit(p.org_id, p.user_id, "integration.deleted", {"integration": name})
+        return Response(status_code=204)
+
+    @app.post("/api/v1/integrations/{name}/test")
+    async def integrations_test(name: str, body: IntegrationTestBody, p: Principal = Depends(authed("integrations:write"))):
+        """Hace una petición GET real (solo si el conector permite GET y la ruta) y devuelve el estado HTTP, sin el cuerpo."""
+        _humans_only(p)
+        try:
+            res = await app.state.integrations.call(p.org_id, name, "GET", body.path, actor=p.user_id)
+        except IntegrationError as exc:
+            raise _integ_http(exc) from None
+        return {"status": res["status"], "ok": res["ok"]}
 
     # ---------- equipo ----------
     def _team_http(exc) -> HTTPException:

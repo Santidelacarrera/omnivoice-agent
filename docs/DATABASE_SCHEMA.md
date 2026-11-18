@@ -32,3 +32,5 @@ Toda tabla con datos de una organización tiene `org_id`, **RLS activada y forza
 | 016 | `kb_sources`, `kb_chunks` (tsvector generado, RLS por organización). |
 | 017 | `organizations.plan`; la aplicación solo puede leerlo (`GRANT SELECT (plan)`); lo cambia el operador con `python -m app.cli set-plan`. |
 | 018 | Funciones `SECURITY DEFINER` `team_list`, `team_set_member`, `team_remove_member`, acotadas a una organización, con las reglas de owner dentro de la función. |
+
+| 019 | `integrations`: conectores por organización con `credential_enc` (Fernet), `allowed_methods`, `allowed_paths`, RLS por organización, nombre único por organización. |

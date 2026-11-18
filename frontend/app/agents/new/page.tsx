@@ -10,6 +10,7 @@ const TOOL_HELP: Record<string, string> = {
   create_support_ticket: "Abrir tickets de soporte", search_knowledge_base: "Buscar en la base de conocimiento", transfer_to_human: "Transferir a una persona",
   end_call: "Finalizar la llamada", lookup_customer: "Reconocer a quien llama", register_customer: "Registrar al cliente (pide confirmación)",
   check_order: "Consultar pedidos de quien llama", send_confirmation: "Enviar SMS de confirmación a quien llama",
+  integration_read: "Consultar un conector externo", integration_write: "Modificar un conector externo (pide confirmación)",
 };
 
 export default function NewAgentWizard() {

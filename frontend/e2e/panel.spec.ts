@@ -206,3 +206,32 @@ test("equipo: añade un miembro, cambia su rol, un admin no puede crear owners y
   await expect(page.getByRole("status")).toContainText("eliminado");
   await expect(page.locator("tr", { hasText: email })).toHaveCount(0);
 });
+
+test("conectores: crea uno sin mostrar la credencial, lo desactiva y lo elimina", async ({ page }) => {
+  await page.goto("/connectors");
+  const name = `crm-${Date.now().toString(36)}`;
+  await page.getByLabel("Nombre del conector").fill(name);
+  await page.getByLabel("URL base").fill("https://crm.example.com/api");
+  await page.getByLabel("Token", { exact: true }).fill("token-secreto-e2e");
+  await page.getByLabel("Rutas permitidas").fill("/orders, /customers");
+  await page.getByRole("button", { name: "Crear conector" }).click();
+  await expect(page.getByRole("status")).toContainText(`Conector «${name}» creado`);
+  const row = page.locator("tr", { hasText: name });
+  await expect(row).toContainText("credencial guardada");
+  await expect(row).toContainText("/orders, /customers");
+  await expect(page.locator("body")).not.toContainText("token-secreto-e2e");
+
+  await row.getByRole("button", { name: "Desactivar" }).click();
+  await expect(row).toContainText("(desactivado)");
+
+  page.once("dialog", (d) => d.accept());
+  await row.getByRole("button", { name: "Eliminar" }).click();
+  await expect(page.locator("tr", { hasText: name })).toHaveCount(0);
+
+  // una URL http se rechaza con un mensaje claro
+  await page.getByLabel("Nombre del conector").fill("inseguro");
+  await page.getByLabel("URL base").fill("http://crm.example.com");
+  await page.getByLabel("Token", { exact: true }).fill("x");
+  await page.getByRole("button", { name: "Crear conector" }).click();
+  await expect(page.locator("p[role=alert]")).toBeVisible();
+});
