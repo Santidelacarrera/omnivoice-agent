@@ -7,7 +7,7 @@
 
 {$API_DOMAIN} {
 	encode zstd gzip
-	@internal path /metrics /metrics/* /docs /docs/* /openapi.json
+	@internal path /metrics /metrics/* /docs /docs/* /redoc /redoc/* /openapi.json
 	respond @internal 404
 	# WebSocket de audio: el backend cierra por inactividad a los 60 s, sin timeouts intermedios.
 	reverse_proxy backend:8000 {
