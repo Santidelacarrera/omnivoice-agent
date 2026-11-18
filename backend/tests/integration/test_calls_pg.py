@@ -31,6 +31,11 @@ class FakeTwilio:
     async def hangup(self, sid, cancel=False): return None
 
 
+def _unique_number() -> str:
+    """Un número nuevo por ejecución: el 409 por «ya hay una llamada activa a ese número» dependía de lo que dejaran ejecuciones anteriores."""
+    return "+346" + str(uuid.uuid4().int)[:8]
+
+
 def _h(org, role="admin"):
     return {"Authorization": f"Bearer {issue_token('u-calls', org, role)}"}
 
@@ -53,7 +58,7 @@ def _settings():
 def test_outbound_call_status_flow_on_postgres():
     tw = FakeTwilio()
     with TestClient(create_app(_settings(), twilio=tw)) as c:
-        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": "+34622222222", "consent_basis": "existing_customer"}).status_code == 202
+        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": _unique_number(), "consent_basis": "existing_customer"}).status_code == 202
         sid = tw.calls[0] and None
         sid = [x for x in c.get("/api/v1/calls", headers=_h(DEMO)).json()["items"] if x["status"] == "QUEUED"][0]["sid"]
         assert tw.calls[0][3] == f"{PUBLIC}/telephony/status"
@@ -115,7 +120,7 @@ def test_transfer_with_context_on_postgres_and_redis():
     tw = FakeTwilio()
     s = _settings().model_copy(update={"human_transfer_number": "+34911111111", "transfer_announce_ms": 10})
     with TestClient(create_app(s, twilio=tw)) as c:
-        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": "+34633333333", "consent_basis": "existing_customer"}).status_code == 202
+        assert c.post("/api/v1/telephony/calls", headers=_h(DEMO), json={"to": _unique_number(), "consent_basis": "existing_customer"}).status_code == 202
         items = c.get("/api/v1/calls", headers=_h(DEMO)).json()["items"]
         call = [i for i in items if i["status"] == "QUEUED"][0]
         assert c.post(f"/api/v1/calls/{call['id']}/transfer", headers=_h(DEMO), json={}).status_code == 409  # aún sin contestar
