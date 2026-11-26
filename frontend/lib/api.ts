@@ -1,13 +1,46 @@
 export const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 export const DEMO_ORG = "00000000-0000-0000-0000-000000000001";
 
-export type Role = "admin" | "operator" | "customer";
+export type Role = "owner" | "admin" | "manager" | "operator" | "analyst" | "viewer" | "customer";
 
-// Tokens solo en memoria (nunca en localStorage). En producción el JWT lo emite tu proveedor de identidad;
-// este flujo usa /auth/dev-token, que el backend desactiva con ENVIRONMENT=production.
+// Tokens solo en sessionStorage (se borra al cerrar la pestaña; nunca en localStorage)
+const KEY = "omnivoice.token";
+
+export function decodeToken(token: string): { sub: string; org: string; role: Role; exp: number } | null {
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    if (typeof payload.exp !== "number" || !payload.role || !payload.org) return null;
+    return { sub: String(payload.sub), org: String(payload.org), role: payload.role, exp: payload.exp };
+  } catch { return null; }
+}
+
+export function getStoredToken(): string | null {
+  try {
+    const t = sessionStorage.getItem(KEY);
+    const info = t ? decodeToken(t) : null;
+    if (t && info && info.exp * 1000 > Date.now() + 10_000) return t;
+    if (t) sessionStorage.removeItem(KEY);
+  } catch { /* sessionStorage no disponible */ }
+  return null;
+}
+
+export function storeToken(token: string): { sub: string; org: string; role: Role; exp: number } {
+  const info = decodeToken(token.trim());
+  if (!info) throw new Error("El token no tiene un formato válido");
+  if (info.exp * 1000 <= Date.now()) throw new Error("El token ya expiró");
+  sessionStorage.setItem(KEY, token.trim());
+  return info;
+}
+
+export function clearToken(): void {
+  try { sessionStorage.removeItem(KEY); } catch { /* nada */ }
+}
+
 const cache = new Map<Role, { token: string; exp: number }>();
 
 export async function getToken(role: Role): Promise<string> {
+  const stored = getStoredToken();
+  if (stored) return stored;
   const hit = cache.get(role);
   if (hit && hit.exp > Date.now() + 30_000) return hit.token;
   const r = await fetch(`${API}/api/v1/auth/dev-token`, {
@@ -19,6 +52,88 @@ export async function getToken(role: Role): Promise<string> {
   const { token } = await r.json();
   cache.set(role, { token, exp: Date.now() + 55 * 60_000 });
   return token;
+}
+
+export async function registerUser(email: string, orgName: string, password: string): Promise<{ org_id: string; user_id: string; token: string }> {
+  const r = await fetch(`${API}/api/v1/auth/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, org_name: orgName, password }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(typeof body.detail === "string" ? body.detail : `Error ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function loginUser(email: string, password: string): Promise<{ token: string }> {
+  const r = await fetch(`${API}/api/v1/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(typeof body.detail === "string" ? body.detail : `Error ${r.status}`);
+  }
+  return r.json();
+}
+
+export async function getCurrentUser(): Promise<{ user_id: string; org_id: string; role: string }> {
+  const r = await fetch(`${API}/api/v1/users/me`, {
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await getToken("customer")}` },
+  });
+  if (!r.ok) throw new Error("No autenticado");
+  return r.json();
+}
+
+export async function getRoles(): Promise<Record<string, string[]>> {
+  const r = await fetch(`${API}/api/v1/roles`, {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!r.ok) throw new Error("Error al obtener roles");
+  const data = await r.json();
+  const roles: Record<string, string[]> = {};
+  for (const entry of data.roles) {
+    const [role, perms] = Object.entries(entry)[0];
+    if (Array.isArray(perms)) roles[role] = perms;
+  }
+  return roles;
+}
+
+export async function getPlan(): Promise<{ plan: string; limits: Record<string, number>; usage: Record<string, number> }> {
+  const r = await fetch(`${API}/api/v1/billing/plan`, {
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await getToken("operator")}` },
+  });
+  if (!r.ok) throw new Error("Error al obtener plan");
+  return r.json();
+}
+
+export async function getBillingHistory(): Promise<{ items: { period: string; amount_usd: number; status: string }[]; total_paid_usd: number }> {
+  const r = await fetch(`${API}/api/v1/billing/history`, {
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await getToken("operator")}` },
+  });
+  if (!r.ok) throw new Error("Error al obtener historial");
+  return r.json();
+}
+
+export async function getKnowledgeList(): Promise<{ items: { id: string; title: string; type: string; size_kb: number; created_at: string }[]; total_size_kb: number; max_size_kb: number }> {
+  const r = await fetch(`${API}/api/v1/knowledge`, {
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await getToken("operator")}` },
+  });
+  if (!r.ok) throw new Error("Error al obtener conocimiento");
+  return r.json();
+}
+
+export async function searchKnowledge(query: string): Promise<{ results: { title: string; snippet: string; source_id: string; ordinal: number }[]; count: number }> {
+  const r = await fetch(`${API}/api/v1/knowledge/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${await getToken("operator")}` },
+    body: JSON.stringify({ q: query }),
+  });
+  if (!r.ok) throw new Error("Error al buscar conocimiento");
+  return r.json();
 }
 
 export async function api<T>(path: string, role: Role, init: RequestInit = {}): Promise<T> {

@@ -156,6 +156,19 @@ class Settings(BaseSettings):
     transfer_announce_ms: int = 3500  # espera para que el agente termine de avisar antes de desviar la llamada
     twilio_validate_signature: bool = True
 
+    # Planes y límites (billing mock - sin pagos reales)
+    billing_enabled: bool = False  # activar cuando se configure pagos reales
+    stripe_api_key: str = ""  # para pagos reales
+    # Límites por plan (en minutos de voz al mes)
+    plan_voice_minutes: dict[str, int] = {"starter": 60, "professional": 600, "business": 3600, "enterprise": -1}
+    plan_concurrent_calls: dict[str, int] = {"starter": 1, "professional": 5, "business": 20, "enterprise": -1}
+    plan_agents: dict[str, int] = {"starter": 1, "professional": 5, "business": 20, "enterprise": -1}
+    plan_phone_numbers: dict[str, int] = {"starter": 0, "professional": 1, "business": 5, "enterprise": -1}
+    plan_api_requests: dict[str, int] = {"starter": 10000, "professional": 100000, "business": 1000000, "enterprise": -1}
+    plan_knowledge_base_mb: dict[str, int] = {"starter": 100, "professional": 1000, "business": 10000, "enterprise": -1}
+    plan_recordings_mb: dict[str, int] = {"starter": 100, "professional": 1000, "business": 10000, "enterprise": -1}
+    plan_team_members: dict[str, int] = {"starter": 1, "professional": 5, "business": 50, "enterprise": -1}
+
     @property
     def active_provider(self) -> str:
         if self.voice_provider != "auto":

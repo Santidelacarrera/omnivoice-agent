@@ -23,7 +23,7 @@ def make_client(**overrides):
     return TestClient(app)
 
 
-def auth(role="customer", org="o1", user="u1"):
+def auth(role="customer", org="00000000-0000-0000-0000-000000000001", user="u1"):
     return {"Authorization": f"Bearer {issue_token(user, org, role)}"}
 
 
@@ -97,12 +97,12 @@ def test_connect_is_bound_to_the_user_who_created_the_session():
 
 def test_conversations_are_isolated_between_organizations():
     c = make_client()
-    _, conn = open_ws(c, auth(org="o1"))
+    _, conn = open_ws(c, auth(org="00000000-0000-0000-0000-000000000001"))
     with c.websocket_connect(conn["ws_path"]) as ws:
         ws.receive_json()
         ws.send_text('{"type":"end"}')
-    assert len(c.get("/api/v1/conversations", headers=auth("operator", org="o1")).json()["items"]) == 1
-    assert c.get("/api/v1/conversations", headers=auth("operator", org="o2")).json()["items"] == []
+    assert len(c.get("/api/v1/conversations", headers=auth("operator", org="00000000-0000-0000-0000-000000000001")).json()["items"]) == 1
+    assert c.get("/api/v1/conversations", headers=auth("operator", org="00000000-0000-0000-0000-000000000002")).json()["items"] == []
 
 
 def test_org_session_cap_returns_429():
@@ -196,7 +196,7 @@ def test_admin_can_erase_a_conversation_and_others_cannot():
         time.sleep(0.05)
     cid = items[0]["id"]
     assert c.delete(f"/api/v1/conversations/{cid}", headers=auth("operator")).status_code == 403
-    assert c.delete(f"/api/v1/conversations/{cid}", headers=auth("admin", org="otra")).status_code == 404
+    assert c.delete(f"/api/v1/conversations/{cid}", headers=auth("admin", org="00000000-0000-0000-0000-000000000002")).status_code == 404
     assert c.delete(f"/api/v1/conversations/{cid}", headers=admin).status_code == 204
     assert c.get(f"/api/v1/conversations/{cid}", headers=admin).status_code == 404
     assert any(a["action"] == "conversation.deleted" for a in c.get("/api/v1/audit-logs", headers=admin).json()["items"])

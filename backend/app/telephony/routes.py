@@ -433,6 +433,10 @@ def register_telephony(app: FastAPI, s: Settings, live: dict[str, VoiceSession],
                     await session.on_audio(telephony_to_platform(ulaw, s.sample_rate))
                 elif event == "stop":
                     break
+                # Manejar confirmaciones del usuario para herramientas que la requieren
+                elif event == "confirmation" and session is not None:
+                    # Evento personalizado para confirmación en telefonía
+                    await session.on_client_event(msg)
         except (WebSocketDisconnect, asyncio.TimeoutError):
             pass
         finally:

@@ -38,8 +38,9 @@ def test_state_machine_rejects_invalid():
 
 
 def test_jwt_roundtrip_and_expiry():
-    tok = issue_token("u", "o", "admin")
-    assert decode_token(tok).org_id == "o"
+    # Usar UUID válido para org_id
+    tok = issue_token("u", "00000000-0000-0000-0000-000000000001", "admin")
+    assert decode_token(tok).org_id == "00000000-0000-0000-0000-000000000001"
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException):
@@ -124,3 +125,56 @@ async def test_reservation_rejects_impossible_date_and_time():
     for bad in ({"date": "2030-13-45", "time": "19:30"}, {"date": "2030-01-02", "time": "25:99"}):
         with pytest.raises(ValueError):
             CreateReservationArgs(name="Ana", party_size=2, **bad)
+
+
+@pytest.mark.asyncio
+async def test_tools_requiring_confirmation_flag():
+    """Verificar que las herramientas sensibles tienen needs_confirmation=True."""
+    from app.tools.handlers import build_registry, InMemoryRepository
+
+    reg = build_registry(InMemoryRepository())
+
+    # Las herramientas que modifican estado deben requerir confirmación
+    tools_with_confirmation = ["create_reservation", "modify_reservation", "cancel_reservation", "register_customer", "integration_write"]
+    for name in tools_with_confirmation:
+        tool = reg._tools.get(name)
+        assert tool is not None, f"Herramienta {name} debe estar registrada"
+        assert tool.needs_confirmation == True, f"Herramienta {name} debe requerir confirmación"
+
+    # Las herramientas de solo lectura no requieren confirmación
+    tools_without_confirmation = ["check_inventory", "check_reservation", "search_knowledge_base", "lookup_customer", "check_order", "transfer_to_human"]
+    for name in tools_without_confirmation:
+        tool = reg._tools.get(name)
+        assert tool is not None, f"Herramienta {name} debe estar registrada"
+        assert tool.needs_confirmation == False, f"Herramienta {name} no debe requerir confirmación"
+
+
+@pytest.mark.asyncio
+async def test_user_roles_and_permissions():
+    """Verificar que los roles tienen permisos correctos (versión remota)."""
+    from app.security.auth import ROLE_PERMISSIONS
+
+    # El owner y admin tienen todos los permisos (set _FULL)
+    assert "agents:publish" in ROLE_PERMISSIONS["owner"]
+    assert "agents:publish" in ROLE_PERMISSIONS["admin"]
+    assert "agents:write" in ROLE_PERMISSIONS["owner"]
+    assert "agents:write" in ROLE_PERMISSIONS["admin"]
+
+    # El manager puede crear/actualizar agentes
+    assert "agents:write" in ROLE_PERMISSIONS["manager"]
+    assert "agents:read" in ROLE_PERMISSIONS["manager"]
+
+    # El operator puede ver y crear sesiones
+    assert "session:create" in ROLE_PERMISSIONS["operator"]
+    assert "telephony:call" in ROLE_PERMISSIONS["operator"]
+
+    # El analyst solo lectura
+    assert "agents:read" in ROLE_PERMISSIONS["analyst"]
+    assert "agents:write" not in ROLE_PERMISSIONS["analyst"]
+
+    # El viewer solo lectura muy limitada
+    assert "agents:read" in ROLE_PERMISSIONS["viewer"]
+    assert "session:create" not in ROLE_PERMISSIONS["viewer"]
+
+    # El customer solo puede crear sesiones
+    assert ROLE_PERMISSIONS["customer"] == {"session:create"}
